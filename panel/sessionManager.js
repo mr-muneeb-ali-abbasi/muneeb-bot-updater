@@ -16,8 +16,11 @@ const QRCode = require('qrcode');
 const config = require('../config');
 const handler = require('../handler');
 
-const MAX_SESSIONS = Math.max(1, parseInt(process.env.MAX_BOTS, 10) || (() => { try { return parseInt(require('../config').maxBots, 10); } catch (_) { return 0; } })() || 8);   // OptikLink 1 GB: 8 bots is the safe limit (env MAX_BOTS overrides, e.g. on Railway)
+const MAX_SESSIONS = 10;
 const SESSIONS_DIR = path.join(__dirname, '..', 'sessions');
+// Jis session ka kabhi successful pairing/login nahi hua (ya disconnect hone ke baad logout
+// ho gaya aur creds clear ho gaye), usko itni der "unconnected" rehne par khud delete kar do.
+const AUTO_DELETE_UNPAIRED_MS = 5 * 60 * 1000; // 5 minute
 
 // ── Cached Baileys version (fetch once, reuse for all sessions) ─────────────
 let _cachedVersion = null;
@@ -82,7 +85,8 @@ class SessionManager extends EventEmitter {
             createdAt: s.createdAt || Date.now(),
             autoRestart: s.autoRestart !== false,
             restartCount: 0,
-            _pairingActive: false
+            _pairingActive: false,
+            _unconnectedSince: null
           });
         }
         console.log(`[SessionManager] Loaded ${this.sessions.size} persisted sessions`);
@@ -146,7 +150,8 @@ class SessionManager extends EventEmitter {
       createdAt: Date.now(),
       autoRestart: true,
       restartCount: 0,
-      _pairingActive: false
+      _pairingActive: false,
+      _unconnectedSince: null
     };
 
     fs.mkdirSync(session.sessionPath, { recursive: true });
@@ -343,6 +348,7 @@ class SessionManager extends EventEmitter {
           session.qrImage = null;
           session.restartCount = 0;
           session._downSince = null;
+          session._unconnectedSince = null;
           session._connectingSince = null;
 
           const phoneNum = sock.user?.id?.split(':')[0] || sock.user?.id?.split('@')[0] || '';
@@ -494,6 +500,7 @@ class SessionManager extends EventEmitter {
           session.qrImage = null;
           session.restartCount = 0;
           session._downSince = null;
+          session._unconnectedSince = null;
           session._connectingSince = null;
 
           const phoneNum = sock.user?.id?.split(':')[0] || sock.user?.id?.split('@')[0] || '';
@@ -543,7 +550,7 @@ class SessionManager extends EventEmitter {
           if (gen !== session._socketGen) return;
 
           const statusCode = lastDisconnect?.error?.output?.statusCode;
-          const isTerminal = statusCode === DisconnectReason.loggedOut || statusCode === 403;
+          const isLoggedOut = statusCode === DisconnectReason.loggedOut;
 
           session.status = SESSION_STATUS.DISCONNECTED;
           session.sock = null;
@@ -552,7 +559,7 @@ class SessionManager extends EventEmitter {
 
           console.log(`[Session ${id}] Connection closed (${statusCode})`);
 
-          if (isTerminal) {
+          if (isLoggedOut) {
             session.connectedNumber = null;
 
             // ── Clear stale/invalid credentials ────────────────────────────
@@ -565,7 +572,7 @@ class SessionManager extends EventEmitter {
             try {
               fs.rmSync(session.sessionPath, { recursive: true, force: true });
               fs.mkdirSync(session.sessionPath, { recursive: true });
-              console.log(`[Session ${id}] 🗑️ Terminal disconnect (${statusCode}) — cleared stale credentials, needs fresh QR/pairing to reconnect`);
+              console.log(`[Session ${id}] 🗑️ Logged out (401) — cleared stale credentials, needs fresh QR/pairing to reconnect`);
             } catch (e) {
               console.error(`[Session ${id}] Failed to clear stale credentials:`, e.message);
             }
@@ -657,7 +664,22 @@ sock.ev.on('group-participants.update', async (update) => {
           if (session._pairingActive) continue;
 
           const hasCreds = fs.existsSync(path.join(session.sessionPath, 'creds.json'));
-          if (!hasCreds) continue; // never auto-start sessions that have never been paired
+          if (!hasCreds) {
+            // Kabhi successful pairing/login nahi hui, ya disconnect/logout hone ke baad
+            // creds clear ho gaye — aisi "dead" session ko kuch hi minute baad khud delete
+            // kar do (dashboard saaf rahega, session-slot waste nahi hoga). Jis session ka
+            // valid login hai (hasCreds===true) wo yahan kabhi nahi aati — usko neeche wala
+            // reconnect-logic (Case 1) sambhalta hai, delete nahi hoti.
+            session._unconnectedSince = session._unconnectedSince || now;
+            if (now - session._unconnectedSince > AUTO_DELETE_UNPAIRED_MS) {
+              console.log(`[Watchdog] Session ${id} (${session.name}) ${AUTO_DELETE_UNPAIRED_MS / 60000}min se unpaired/disconnected hai, koi valid login nahi → auto-delete kar raha hoon`);
+              this.deleteSession(id).catch(e =>
+                console.error(`[Watchdog] Session ${id} auto-delete error:`, e.message)
+              );
+            }
+            continue; // never auto-start sessions that have never been paired
+          }
+          session._unconnectedSince = null;
 
           const status = session.status;
           const sock   = session.sock;
