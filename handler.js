@@ -923,6 +923,23 @@ const _handleMessageInner = async (sock, msg) => {
       return false; // if no cache yet, assume false; watchdog/next message will warm it
     })() : false;
 
+    // ── Anti-Bug/Crash Guard — crash/virus bot-tool commands aur malformed payload fauran pakड़ta hai,
+    //    DM aur group dono mein (see utils/antiBug.js). Sabse pehle chalta hai, antilink ke turant baad.
+    if (!msg.key.fromMe) {
+      try {
+        const _abOwner = isOwner(sender);
+        const _abAdmin = (!_abOwner && isGroup) ? await isAdmin(sock, sender, from, groupMetadata) : false;
+        const _abGone = await require('./utils/antiBug').inspect(sock, msg, {
+          from, sender, isGroup,
+          isLeader: isGroup ? _isLeader : true,
+          senderIsOwner: _abOwner,
+          senderIsAdmin: _abAdmin,
+          botIsAdmin: _msgBotAdmin,
+        });
+        if (_abGone) return;
+      } catch (e) { console.error('[AntiBug]', e?.message || e); }
+    }
+
     // ── Anti-group-status — runs FIRST so a group-status post is always caught ──
     // (warning on the 1st post, removal on the 2nd; English notices. See utils/antiGroupMention.js)
     if (isGroup && !msg.key.fromMe) {
@@ -1679,10 +1696,27 @@ const handleGroupUpdate = async (sock, update) => {
 };
 
 // ── Anti-link ─────────────────────────────────────────────────────────────────
+// Dedup WhatsApp message-ID se hota hai (sirf object-flag se nahi) — kyunki ek hi group mein
+// agar tumhare MULTIPLE bots member hon, to har bot apna ALAG `msg` object banata hai usi
+// ek WhatsApp message ke liye, isliye purana `msg.__alDone` dusre bot ko nahi rokta tha aur
+// wahi "Anti-Link" warning do (ya zyada) baar chali jaati thi. Ye Map saare bots ke beech
+// shared hai (handler.js ek hi baar load hota hai sab sockets ke liye), isliye ab sahi se rukta hai.
+const _alSeen = new Map();   // "group:msgId" → timestamp
+const AL_DEDUPE_MS = 20000;
+function _alAlreadyHandled(msg) {
+  try {
+    const key = `${msg.key.remoteJid}:${msg.key.id}`;
+    const now = Date.now();
+    if (_alSeen.has(key) && now - _alSeen.get(key) < AL_DEDUPE_MS) return true;
+    _alSeen.set(key, now);
+    if (_alSeen.size > 3000) for (const [k, t] of _alSeen) if (now - t > AL_DEDUPE_MS * 3) _alSeen.delete(k);
+    return false;
+  } catch (_) { return false; }
+}
+
 const handleAntilink = async (sock, msg, groupMetadata, opts = {}) => {
   try {
-    if (msg.__alDone) return false;            // ek message par ek hi baar (early hook + purani jagah dono se call hota hai)
-    msg.__alDone = true;
+    if (_alAlreadyHandled(msg)) return false;   // ek WhatsApp message par ek hi baar — chahe kitne bhi bots group mein ho
     if (msg.key.fromMe) return false;
     const from   = msg.key.remoteJid;
     const sender = msg.key.participant || msg.key.participantPn || msg.key.remoteJid;
@@ -1692,6 +1726,11 @@ const handleAntilink = async (sock, msg, groupMetadata, opts = {}) => {
     const lg   = require('./utils/linkGuard');
     const text = lg.extractText(msg.message);          // sirf text nahi — payment-note, buttons, invite-card, poll, edited... sab
     if (!lg.hasLink(text)) return false;
+
+    // DEBUG: agla false-positive aaye to iska console output developer ko bhej dena — exact pata chal jayega.
+    try {
+      console.log(`[AntiLink DEBUG] group=${from} sender=${sender} msgTypes=${Object.keys(msg.message || {}).join(',')} extractedText="${text.slice(0, 600).replace(/\n/g, ' ⏎ ')}"`);
+    } catch (_) {}
 
     // known command + koi group-invite nahi → command hai (.tiktok https://... waghera), mat chhedo
     if (opts.commands && !lg.hasInvite(text)) {
