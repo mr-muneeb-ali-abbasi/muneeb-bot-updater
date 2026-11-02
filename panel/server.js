@@ -27,7 +27,6 @@ const fs             = require('fs');
 const { randomUUID, createHash } = require('crypto');
 const sessionManager = require('./sessionManager');
 const { SESSION_STATUS } = require('./sessionManager');
-const registry       = require('./serverRegistry');
 
 const app    = express();
 const server = http.createServer(app);
@@ -38,24 +37,10 @@ const io     = new Server(server, {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ── CORS — the Vercel frontend (and any extra origin in ALLOWED_ORIGINS) may call this backend ─────────
-// Public endpoints (/api/public/*, /api/servers/*) are open to any site (no cookies involved) so the website
-// can talk to Server 1 AND Server 2 directly. Admin endpoints stay restricted to the allowed origins.
-const _ALLOWED_ORIGINS = ['https://mr-muneeb-ali-bot.vercel.app']
-  .concat(String(process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean));
+// ── CORS — allow the Vercel-hosted frontend to call this backend ──────────────
 app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  const isPublicApi = req.path.startsWith('/api/public') || req.path.startsWith('/api/servers');
-  if (origin && _ALLOWED_ORIGINS.includes(origin)) {
-    res.header('Access-Control-Allow-Origin', origin);
-    res.header('Access-Control-Allow-Credentials', 'true');
-  } else if (isPublicApi) {
-    res.header('Access-Control-Allow-Origin', '*');
-  } else if (!origin) {
-    res.header('Access-Control-Allow-Origin', _ALLOWED_ORIGINS[0]);
-    res.header('Access-Control-Allow-Credentials', 'true');
-  }
-  res.header('Vary', 'Origin');
+  res.header('Access-Control-Allow-Origin', 'https://mr-muneeb-ali-bot.vercel.app');
+  res.header('Access-Control-Allow-Credentials', 'true');
   res.header('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type, Bypass-Tunnel-Reminder');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
@@ -210,7 +195,7 @@ app.get('/api/sessions/:id/qr', requirePanelAuth, (req, res) => {
 app.get('/api/status', (req, res) => {
   const sessions  = sessionManager.getSessions();
   const connected = sessions.filter(s => s.status === SESSION_STATUS.CONNECTED).length;
-  res.json({ total: sessions.length, connected, max: sessionManager.MAX_SESSIONS, uptime: process.uptime(), server: registry.ownName() });
+  res.json({ total: sessions.length, connected, max: sessionManager.MAX_SESSIONS, uptime: process.uptime() });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -238,44 +223,11 @@ setInterval(() => {
   }
 }, 60 * 1000);
 
-// This server's live numbers (what the website's "Server" cards show)
-function _selfInfo() {
-  const sessions  = sessionManager.getSessions();
-  const connected = sessions.filter(s => s.status === SESSION_STATUS.CONNECTED).length;
-  const max       = sessionManager.MAX_SESSIONS;
-  return {
-    id: process.env.SERVER_ID || registry.ownName().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'server',
-    name: registry.ownName(),
-    url: registry.ownPublicUrl(currentBackendUrl),
-    connected, total: sessions.length, max,
-    free: Math.max(0, max - sessions.length),
-  };
-}
-
 // GET /api/public/status — only total connected count, NO user details
 app.get('/api/public/status', (req, res) => {
-  const i = _selfInfo();
-  res.json({ connected: i.connected, max: i.max, free: i.free });
-});
-
-// GET /api/public/server-info — this server only
-app.get('/api/public/server-info', (req, res) => { res.json(_selfInfo()); });
-
-// GET /api/public/servers — every known server (this one first) with live connected / free-slot numbers
-app.get('/api/public/servers', async (req, res) => {
-  try { res.json({ servers: await registry.listAll(_selfInfo()) }); }
-  catch (e) { res.json({ servers: [Object.assign({ online: true }, _selfInfo())] }); }
-});
-
-// POST /api/servers/register — a secondary server (Railway) adds itself to this list (shared secret required)
-app.post('/api/servers/register', (req, res) => {
-  const { name, url, secret } = req.body || {};
-  const want = String(process.env.REGISTRY_SECRET || '');
-  const ok = want && typeof secret === 'string' && secret.length === want.length &&
-             require('crypto').timingSafeEqual(Buffer.from(secret), Buffer.from(want));
-  if (!ok) return res.status(403).json({ success: false });
-  const r = registry.register({ name, url });
-  res.status(r.ok ? 200 : 400).json({ success: r.ok });
+  const sessions  = sessionManager.getSessions();
+  const connected = sessions.filter(s => s.status === SESSION_STATUS.CONNECTED).length;
+  res.json({ connected, max: sessionManager.MAX_SESSIONS, name: require('../config').serverName || 'Server' });
 });
 
 // POST /api/public/connect — create anonymous session, return private token
@@ -301,7 +253,7 @@ app.post('/api/public/connect', async (req, res) => {
     }
 
     if (sessions.length >= sessionManager.MAX_SESSIONS) {
-      return res.status(429).json({ success: false, full: true, error: `Ye server full hai (${sessionManager.MAX_SESSIONS}/${sessionManager.MAX_SESSIONS}). Dusra server select karo.` });
+      return res.status(429).json({ success: false, error: 'Server is at capacity. Please try again later.' });
     }
     const token    = randomUUID();
     const autoName = `Bot_${token.slice(0, 8)}`;
@@ -466,58 +418,48 @@ const PORT = process.env.SERVER_PORT || process.env.PORT || 5915;
 // every time the backend restarts.
 let currentBackendUrl = null;
 
-// ── Publish the current backend URL to a GitHub Gist ────────────────────────
-// This is what lets the frontend auto-discover the URL without any manual
-// update, using GitHub's own (very reliable) infrastructure as the
-// discovery channel instead of depending on either tunnel's own uptime.
-// Every server publishes ITS OWN file (server-<id>.json) in the shared gist — no server depends on another one.
-// The website reads all server-*.json files, pings each server directly and shows whoever is alive.
-// (Only the primary also keeps writing the old backend-url.txt, for the admin panel / old frontends.)
-let _heartbeatStarted = false;
-let _ghostsCleaned = false;
-function publishBackendUrlToGist(url) {
-  url = registry.ownPublicUrl(url) || url;      // PUBLIC_URL (fixed domain) wins over a tunnel URL
-  if (!url) return;
+// ── Multi-server status publishing (fixes the "Select Server" flakiness) ──
+// OLD BEHAVIOUR (bug): har server ek hi FIXED gist filename ("backend-url.txt")
+// pe apna URL likhta tha. Jab 3 servers same gist pe likhte, har server dusre
+// ka likha hua OVERWRITE kar deta — isiliye kabhi ek online dikhta kabhi
+// dusra offline (jo bhi last publish kare wahi "jeeta"), aur slots bhi
+// (hardcoded 10) config se match nahi karte the.
+//
+// NEW: har server apni OWN file likhta hai, uske config.serverName se naam
+// banta hai (e.g. "server-server-1.json"), jisme uska apna URL + kitne bots
+// connected + kitne max slots + aakhri update ka time hota hai. Frontend
+// ye POORI gist ek hi call mein padhta hai aur jitni bhi "server-*.json"
+// files milti hain unko cards bana deta hai — koi hardcoded list nahi,
+// naya server add karo (naya serverName + maxSlots config mein daalo) to
+// wo khud hi website pe aa jayega.
+function _slug(s) {
+  return String(s || 'server').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'server';
+}
+
+function publishServerStatus(url) {
   try {
     const cfg = require('../config');
-    const token = cfg.gistToken || process.env.GIST_TOKEN;
-    if (!cfg.gistId || !token) { console.log('[Gist] ⚠️ GIST_TOKEN set nahi hai — website is server ko dhoondh nahi payegi'); return; }
-    const info  = _selfInfo();
-    const sid   = String(info.id || 'server').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30) || 'server';
-    const files = { [`server-${sid}.json`]: { content: JSON.stringify({ id: sid, name: info.name, url, updated: Date.now() }) } };
-    if (!registry.isSecondary()) files[cfg.gistFilename || 'backend-url.txt'] = { content: url };
+    if (!cfg.gistId || !cfg.gistToken) return; // not configured on this server — skip silently
     const https = require('https');
-    // GHOST CLEAN-UP: an older file of THIS server (same name, different id — e.g. after a rename / config.js swap) would show up on
-    // the website as a second, "Offline" copy forever. Once per start, delete every server-*.json that carries my name but not my id.
-    if (!_ghostsCleaned) {
-      _ghostsCleaned = true;
-      const baseName = (n) => String(n || '').replace(/\s*\(.*?\)\s*/g, ' ').trim().toLowerCase();
-      https.get({ hostname: 'api.github.com', path: `/gists/${cfg.gistId}`, headers: { 'Authorization': `token ${token}`, 'User-Agent': 'muneeb-bot' }, timeout: 10000 }, (gr) => {
-        let d = ''; gr.on('data', (c) => d += c);
-        gr.on('end', () => {
-          try {
-            const gj = JSON.parse(d), del = {};
-            for (const [fn, f] of Object.entries(gj.files || {})) {
-              if (!/^server-.*\.json$/.test(fn) || fn === `server-${sid}.json`) continue;
-              let e = null; try { e = JSON.parse(f.content || (f.truncated ? '' : '')); } catch (_) {}
-              if (e && baseName(e.name) === baseName(info.name)) del[fn] = null;
-            }
-            const names = Object.keys(del);
-            if (!names.length) return;
-            const body = JSON.stringify({ files: del });
-            const rq = https.request({ hostname: 'api.github.com', path: `/gists/${cfg.gistId}`, method: 'PATCH', headers: { 'Authorization': `token ${token}`, 'User-Agent': 'muneeb-bot', 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, (r2) => { r2.resume(); r2.on('end', () => console.log(`[Gist] 🧹 purani duplicate entry hata di: ${names.join(', ')} (HTTP ${r2.statusCode})`)); });
-            rq.on('error', () => {}); rq.end(body);
-          } catch (_) {}
-        });
-      }).on('error', () => {});
-    }
-    const payload = JSON.stringify({ files });
+    const sessions = sessionManager.getSessions();
+    const connected = sessions.filter(s => s.status === SESSION_STATUS.CONNECTED).length;
+    const statusObj = {
+      name: cfg.serverName || 'Server',
+      url: url || currentBackendUrl || '',
+      connected,
+      maxSlots: sessionManager.MAX_SESSIONS,
+      updatedAt: Date.now()
+    };
+    const filename = `server-${_slug(cfg.serverName)}.json`;
+    const payload = JSON.stringify({
+      files: { [filename]: { content: JSON.stringify(statusObj) } }
+    });
     const req = https.request({
       hostname: 'api.github.com',
       path: `/gists/${cfg.gistId}`,
       method: 'PATCH',
       headers: {
-        'Authorization': `token ${token}`,
+        'Authorization': `token ${cfg.gistToken}`,
         'User-Agent': 'muneeb-bot',
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(payload)
@@ -525,21 +467,25 @@ function publishBackendUrlToGist(url) {
     }, (res) => {
       res.on('data', () => {});
       res.on('end', () => {
-        if (res.statusCode === 200) console.log(`[Gist] ✅ ${info.name} publish ho gaya — website khud dhoondh legi`);
-        else console.log(`[Gist] ⚠️ Publish failed (HTTP ${res.statusCode}) — GIST_TOKEN / gistId check karo`);
+        if (res.statusCode !== 200) {
+          console.log(`[Gist] ⚠️ Publish failed (HTTP ${res.statusCode}) for ${filename}`);
+        }
       });
     });
     req.on('error', (e) => console.log('[Gist] Publish error:', e.message));
     req.write(payload);
     req.end();
-    if (!_heartbeatStarted) {   // keep the entry fresh (and re-publish if the tunnel URL changed)
-      _heartbeatStarted = true;
-      setInterval(() => publishBackendUrlToGist(registry.ownPublicUrl(currentBackendUrl)), 5 * 60 * 1000).unref?.();
-    }
   } catch (e) {
     console.log('[Gist] Publish error:', e.message);
   }
 }
+
+// Heartbeat — har 30 second status republish karta hai (sirf URL change hone
+// pe nahi), taaki "connected" count aur "updatedAt" hamesha fresh rahe aur
+// frontend ko pata chal sake ke server abhi bhi zinda hai (stale/purana
+// updatedAt dekh kar frontend khud "Offline" dikha dega agar server sach
+// mein crash ho jaye).
+setInterval(() => publishServerStatus(currentBackendUrl), 30 * 1000);
 
 // A stable discovery endpoint — the frontend hits the FIXED localtunnel URL
 // first just to ask "what's the current real backend URL right now?", then
@@ -555,17 +501,6 @@ function startPanelServer() {
     console.log(`📊 Managing up to ${sessionManager.MAX_SESSIONS} bot sessions\n`);
     sessionManager.autoStartSessions();
 
-    // ── Secondary host (Railway etc.): it already has a public HTTPS domain — no tunnels needed ──
-    // (a secondary host WITHOUT its own https domain — e.g. Enzonic, http only — still needs a Cloudflare tunnel: handled below)
-    if (registry.isSecondary() && registry.ownPublicUrl(null)) {
-      currentBackendUrl = registry.ownPublicUrl(null) || null;
-      console.log(`🛰️  ${registry.ownName()} (apna alag server) — public URL: ${currentBackendUrl || '(PUBLIC_URL set karo)'}`);
-      publishBackendUrlToGist(currentBackendUrl);
-      return;
-    }
-
-    if (process.env.PUBLIC_URL) publishBackendUrlToGist(process.env.PUBLIC_URL);   // primary on a fixed domain
-
     // ── Free HTTPS tunnel — Cloudflare Tunnel (primary) with localtunnel fallback ──
     // loca.lt is a single hobby-run relay that goes down unpredictably (503s,
     // random subdomain reassignment). Cloudflare's free "quick tunnel" runs on
@@ -573,49 +508,16 @@ function startPanelServer() {
     // If the cloudflared binary can't run on this host (some restricted
     // containers block spawning external binaries), we fall back to the old
     // localtunnel approach so the bot still gets SOME public URL.
-    // The npm package downloads the cloudflared binary in its postinstall step. Hosts that skip install scripts
-    // (or a half-finished npm install) leave node_modules/cloudflared/bin/cloudflared missing → spawn ENOENT.
-    // Fetch it straight from Cloudflare's GitHub release when it is absent.
-    const ensureCloudflaredBinary = (binPath) => new Promise((resolve) => {
-      const fs = require('fs'), path = require('path'), https = require('https');
-      try { if (fs.existsSync(binPath) && fs.statSync(binPath).size > 1e6) { try { fs.chmodSync(binPath, 0o755); } catch (_) {} return resolve(true); } } catch (_) {}
-      const asset = process.arch === 'arm64' ? 'cloudflared-linux-arm64' : 'cloudflared-linux-amd64';
-      console.log(`[Cloudflare Tunnel] binary nahi mila — ${asset} download ho raha hai...`);
-      const tmp = binPath + '.part';
-      const get = (url, hops) => {
-        if (hops > 6) return resolve(false);
-        https.get(url, { headers: { 'User-Agent': 'muneeb-bot' }, timeout: 60000 }, (res) => {
-          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) { res.resume(); return get(new URL(res.headers.location, url).toString(), hops + 1); }
-          if (res.statusCode !== 200) { res.resume(); console.log('[Cloudflare Tunnel] download HTTP', res.statusCode); return resolve(false); }
-          try { fs.mkdirSync(path.dirname(binPath), { recursive: true }); } catch (_) {}
-          const out = fs.createWriteStream(tmp);
-          res.pipe(out);
-          out.on('finish', () => out.close(() => {
-            try { if (fs.statSync(tmp).size < 1e6) throw new Error('file too small'); fs.chmodSync(tmp, 0o755); fs.renameSync(tmp, binPath); console.log('[Cloudflare Tunnel] ✅ binary download ho gaya'); resolve(true); }
-            catch (e) { console.log('[Cloudflare Tunnel] download fail:', e.message); try { fs.unlinkSync(tmp); } catch (_) {} resolve(false); }
-          }));
-          out.on('error', () => resolve(false));
-          res.on('error', () => resolve(false));
-        }).on('error', (e) => { console.log('[Cloudflare Tunnel] download error:', e.message); resolve(false); })
-          .on('timeout', function () { this.destroy(); resolve(false); });
-      };
-      get(`https://github.com/cloudflare/cloudflared/releases/latest/download/${asset}`, 0);
-    });
-
     (async () => {
       let usedCloudflare = false;
 
       try {
-        const { Tunnel, bin: cfBin } = require('cloudflared');
+        const { Tunnel } = require('cloudflared');
         let cfTunnel = null;
-        let cfFails = 0;
 
         const connectCloudflare = async () => {
           try {
-            if (cfBin && !(await ensureCloudflaredBinary(cfBin))) throw new Error('cloudflared binary available nahi');
             cfTunnel = Tunnel.quick(`http://localhost:${PORT}`);
-            // spawn errors (ENOENT / EACCES) arrive as an 'error' event — without a listener they crash the process
-            cfTunnel.on('error', (err) => { console.log('[Cloudflare Tunnel] process error:', err && err.message); });
 
             const urlPromise = new Promise((resolve, reject) => {
               const timer = setTimeout(() => reject(new Error('timeout waiting for URL')), 30000);
@@ -623,9 +525,8 @@ function startPanelServer() {
             });
 
             const url = await urlPromise;
-            usedCloudflare = true; cfFails = 0;
             currentBackendUrl = url;
-            publishBackendUrlToGist(url);
+            publishServerStatus(url);
             console.log(`\n🔒 Public HTTPS URL (Cloudflare): ${url}\n`);
             console.log(`ℹ️  Frontend will auto-discover this — no manual update needed.`);
 
@@ -634,22 +535,16 @@ function startPanelServer() {
               setTimeout(connectCloudflare, 5000);
             });
           } catch (e) {
-            cfFails++;
-            const wait = Math.min(5000 * cfFails, 60000);
-            try { if (cfTunnel) cfTunnel.stop && cfTunnel.stop(); } catch (_) {}
-            console.log(`[Cloudflare Tunnel] failed to start: ${e.message} — retrying in ${wait / 1000}s (localtunnel URL tab tak chalega)...`);
-            setTimeout(connectCloudflare, wait);
+            console.log('[Cloudflare Tunnel] failed to start:', e.message, '— retrying in 5s...');
+            setTimeout(connectCloudflare, 5000);
           }
         };
 
-        connectCloudflare();   // not awaited: localtunnel below must start even while Cloudflare is still failing
+        await connectCloudflare();
+        usedCloudflare = true;
       } catch (e) {
         console.log('[Cloudflare Tunnel] package not available:', e.message);
       }
-
-      // Secondary server: its own Cloudflare URL is published under its own name only (server-<id>.json).
-      // localtunnel uses ONE fixed subdomain that belongs to the primary server, so it must not run here.
-      if (registry.isSecondary()) return;
 
       // localtunnel always runs too now — even when Cloudflare succeeds —
       // since its fixed, predictable URL is what makes the discovery
@@ -682,7 +577,7 @@ function startPanelServer() {
             }
 
             console.log(`\n🔒 Public HTTPS URL (localtunnel): ${tunnelInstance.url}\n`);
-            if (!usedCloudflare) { currentBackendUrl = tunnelInstance.url; publishBackendUrlToGist(tunnelInstance.url); }
+            if (!usedCloudflare) { currentBackendUrl = tunnelInstance.url; publishServerStatus(tunnelInstance.url); }
 
             tunnelInstance.on('close', () => { setTimeout(connectTunnel, 5000); });
             tunnelInstance.on('error', () => { setTimeout(connectTunnel, 5000); });

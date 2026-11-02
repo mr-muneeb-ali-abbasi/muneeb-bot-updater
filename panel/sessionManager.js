@@ -16,7 +16,13 @@ const QRCode = require('qrcode');
 const config = require('../config');
 const handler = require('../handler');
 
-const MAX_SESSIONS = 10;
+// Pehle yahan hardcoded "10" tha — har server pe same fixed number dikhta tha,
+// chahe config.js mein kuchh bhi likha ho. Ab config.js ke "maxSlots" field se
+// seedha uthata hai, taaki jo number tum config mein set karo wahi website pe
+// sahi dikhe (yehi tha "jyada slots dikhata hai" bug ki asli wajah).
+const MAX_SESSIONS = (Number.isFinite(Number(config.maxSlots)) && Number(config.maxSlots) > 0)
+  ? Number(config.maxSlots)
+  : 10;
 const SESSIONS_DIR = path.join(__dirname, '..', 'sessions');
 // Jis session ka kabhi successful pairing/login nahi hua (ya disconnect hone ke baad logout
 // ho gaya aur creds clear ho gaye), usko itni der "unconnected" rehne par khud delete kar do.
