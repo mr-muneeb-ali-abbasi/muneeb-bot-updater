@@ -109,6 +109,17 @@ const PUBLIC_DIR = fs.existsSync(_pub1) ? _pub1 : _pub2;
 
 app.set('trust proxy', 1);
 
+// The ONE real public website now lives on Vercel — this backend used to also
+// keep its own local copy of index.html and serve that at "/", which is what
+// caused the admin panel's "Home" button to land on an old/out-of-date design
+// (two copies of the site existing in two places, easy to forget to update
+// one of them). Instead of serving a local copy at all, "/" just bounces
+// straight to the real site, so there is only ever one website to keep
+// up to date — update it once on Vercel and every server's "Home" button
+// (and anyone who opens the bare backend URL by mistake) always lands there.
+const PUBLIC_SITE_URL = 'https://mr-muneeb-ali-bot.vercel.app';
+app.get('/', (req, res) => res.redirect(302, PUBLIC_SITE_URL));
+
 // ── /manage — admin panel (canonical, no-cache) ───────────────────────────────
 app.get('/manage', (req, res) => {
   const filePath = path.join(PUBLIC_DIR, 'panel.html');
@@ -291,16 +302,11 @@ app.post('/api/public/connect/:token/paircode', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// FALLBACK — serve index.html for all unmatched routes
+// FALLBACK — any other unmatched route also bounces to the real website
+// instead of serving a (possibly stale) local copy.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-app.use((req, res) => {
-  const filePath = path.join(PUBLIC_DIR, 'index.html');
-  if (!fs.existsSync(filePath))
-    return res.status(500).send('<h2>index.html not found</h2>');
-  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-  return res.sendFile(filePath);
-});
+app.use((req, res) => res.redirect(302, PUBLIC_SITE_URL));
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SOCKET.IO — real-time panel events (admin panel)
@@ -436,10 +442,22 @@ function _slug(s) {
   return String(s || 'server').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'server';
 }
 
+// ── Rate-limit safe publishing ──
+// GitHub ne "API rate limit exceeded" diya tha kyunki har server har 15s mein
+// PATCH kar raha tha (240/ghanta/server). Ab sirf tab likhta hai jab kuch
+// badla ho (url / connected count), warna 4 minute mein ek heartbeat.
+// Rate limit milne par GitHub ke bataye time tak chup rehta hai.
+const GIST_HEARTBEAT_MS = 4 * 60 * 1000;   // unchanged hone par bhi itne mein ek baar
+const GIST_MIN_GAP_MS   = 30 * 1000;       // sirf count badalne par minimum gap
+let _gistLast = { key: '', time: 0 };
+let _gistBackoffUntil = 0;
+
 function publishServerStatus(url) {
   try {
     const cfg = require('../config');
     if (!cfg.gistId || !cfg.gistToken) return; // not configured on this server — skip silently
+    const now = Date.now();
+    if (now < _gistBackoffUntil) return;       // rate-limited — wait it out
     const https = require('https');
     const sessions = sessionManager.getSessions();
     const connected = sessions.filter(s => s.status === SESSION_STATUS.CONNECTED).length;
@@ -448,12 +466,18 @@ function publishServerStatus(url) {
       url: url || currentBackendUrl || '',
       connected,
       maxSlots: sessionManager.MAX_SESSIONS,
-      updatedAt: Date.now()
+      updatedAt: now
     };
+    const key = JSON.stringify([statusObj.name, statusObj.url, statusObj.connected, statusObj.maxSlots]);
+    const sinceLast = now - _gistLast.time;
+    const urlChanged = _gistLast.key && JSON.parse(_gistLast.key)[1] !== statusObj.url;
+    if (key === _gistLast.key && sinceLast < GIST_HEARTBEAT_MS) return;          // nothing new
+    if (key !== _gistLast.key && !urlChanged && sinceLast < GIST_MIN_GAP_MS) return; // count flapping
     const filename = `server-${_slug(cfg.serverName)}.json`;
     const payload = JSON.stringify({
       files: { [filename]: { content: JSON.stringify(statusObj) } }
     });
+    _gistLast = { key, time: now };            // mark before request so we never double-fire
     const req = https.request({
       hostname: 'api.github.com',
       path: `/gists/${cfg.gistId}`,
@@ -465,14 +489,33 @@ function publishServerStatus(url) {
         'Content-Length': Buffer.byteLength(payload)
       }
     }, (res) => {
-      res.on('data', () => {});
+      let body = '';
+      res.on('data', (c) => { if (body.length < 2000) body += c; });
       res.on('end', () => {
-        if (res.statusCode !== 200) {
-          console.log(`[Gist] ⚠️ Publish failed (HTTP ${res.statusCode}) for ${filename}`);
+        if (res.statusCode === 200) return;
+        let why = '';
+        try { why = JSON.parse(body).message || ''; } catch (_) { why = body.slice(0, 120); }
+        const limited = /rate limit/i.test(why) || res.statusCode === 429;
+        _gistLast = { key: '', time: 0 };      // retry next tick (after backoff)
+        if (limited) {
+          let waitMs = 5 * 60 * 1000;
+          const ra = parseInt(res.headers['retry-after'], 10);
+          const reset = parseInt(res.headers['x-ratelimit-reset'], 10);
+          if (ra > 0) waitMs = ra * 1000;
+          else if (res.headers['x-ratelimit-remaining'] === '0' && reset > 0) waitMs = Math.max(0, reset * 1000 - Date.now()) + 5000;
+          waitMs = Math.min(Math.max(waitMs, 60 * 1000), 65 * 60 * 1000);
+          _gistBackoffUntil = Date.now() + waitMs;
+          console.log(`[Gist] ⏳ GitHub rate limit — ${Math.round(waitMs / 60000)} min ruk kar dobara try karunga (token theek hai).`);
+        } else {
+          console.log(`[Gist] ⚠️ Publish failed (HTTP ${res.statusCode}) for ${filename} — GitHub says: ${why}`);
+          if (res.statusCode === 401 || res.statusCode === 403) {
+            console.log('[Gist] 👉 Token expired/revoked/bina "gist" scope ka ho sakta hai — github.com/settings/tokens check karo.');
+          }
+          _gistBackoffUntil = Date.now() + 60 * 1000;
         }
       });
     });
-    req.on('error', (e) => console.log('[Gist] Publish error:', e.message));
+    req.on('error', (e) => { _gistLast = { key: '', time: 0 }; console.log('[Gist] Publish error:', e.message); });
     req.write(payload);
     req.end();
   } catch (e) {
@@ -485,7 +528,7 @@ function publishServerStatus(url) {
 // frontend ko pata chal sake ke server abhi bhi zinda hai (stale/purana
 // updatedAt dekh kar frontend khud "Offline" dikha dega agar server sach
 // mein crash ho jaye).
-setInterval(() => publishServerStatus(currentBackendUrl), 30 * 1000);
+setInterval(() => publishServerStatus(currentBackendUrl), 15 * 1000);
 
 // A stable discovery endpoint — the frontend hits the FIXED localtunnel URL
 // first just to ask "what's the current real backend URL right now?", then
@@ -532,6 +575,16 @@ function startPanelServer() {
 
             cfTunnel.on('exit', (code) => {
               console.log(`[Cloudflare Tunnel] process exited (code ${code}) — reconnecting in 5s...`);
+              // Cloudflare's free "quick tunnel" can die on its own every so often —
+              // that's normal, not a bug. The bug was that the OLD dead URL kept
+              // getting republished as "fresh"/online for up to 30s after it
+              // actually stopped working, because nothing told the Gist it had
+              // died until the NEXT successful reconnect. Now the moment it dies,
+              // we immediately mark this server as unreachable (empty url) so the
+              // website shows an honest "Offline" right away instead of a stale
+              // "Online" that silently fails when someone tries to connect.
+              currentBackendUrl = null;
+              publishServerStatus(null);
               setTimeout(connectCloudflare, 5000);
             });
           } catch (e) {
@@ -579,8 +632,14 @@ function startPanelServer() {
             console.log(`\n🔒 Public HTTPS URL (localtunnel): ${tunnelInstance.url}\n`);
             if (!usedCloudflare) { currentBackendUrl = tunnelInstance.url; publishServerStatus(tunnelInstance.url); }
 
-            tunnelInstance.on('close', () => { setTimeout(connectTunnel, 5000); });
-            tunnelInstance.on('error', () => { setTimeout(connectTunnel, 5000); });
+            tunnelInstance.on('close', () => {
+              if (!usedCloudflare) { currentBackendUrl = null; publishServerStatus(null); }
+              setTimeout(connectTunnel, 5000);
+            });
+            tunnelInstance.on('error', () => {
+              if (!usedCloudflare) { currentBackendUrl = null; publishServerStatus(null); }
+              setTimeout(connectTunnel, 5000);
+            });
           } catch (e) {
             console.log('[Tunnel] failed to start:', e.message, '— retrying in 5s...');
             setTimeout(connectTunnel, 5000);
