@@ -6,7 +6,7 @@
 
 // ONE update repo for both the version check and the download (config.updateZipUrl is deliberately NOT used any more:
 // it pointed to a different repo than the version check). Override with env UPDATE_ZIP_URL if ever needed.
-const DEFAULT_ZIP = 'https://github.com/mrmuneebali907-byte/muneeb-bot-updater/archive/refs/heads/main.zip';
+const DEFAULT_ZIP = 'https://github.com/mr-muneeb-ali-abbasi/muneeb-bot-updater/archive/refs/heads/main.zip';
 
 function zipUrl() { return process.env.UPDATE_ZIP_URL || DEFAULT_ZIP; }
 
@@ -23,7 +23,7 @@ function scrub(text) {
   return String(text || '')
     .replace(/https?:\/\/\S+/gi, '[server]')
     .replace(/github(usercontent)?\.com\S*/gi, '[server]')
-    .replace(/mrmuneebali907-byte\S*/gi, '[server]')
+    .replace(/mr-muneeb-ali-abbasi\S*/gi, '[server]')
     .slice(0, 300);
 }
 

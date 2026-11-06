@@ -17,7 +17,7 @@ let config = {};
 try { config = require('../config'); } catch (_) {}
 
 const VERSION_URL = config.updateVersionUrl ||
-  'https://raw.githubusercontent.com/mrmuneebali907-byte/muneeb-bot-updater/main/version.json';
+  'https://raw.githubusercontent.com/mr-muneeb-ali-abbasi/muneeb-bot-updater/main/version.json';
 
 const STATE_FILE = path.join(process.cwd(), 'data', 'updateNotified.json');
 const EVERY_MS   = 6 * 60 * 60 * 1000;
