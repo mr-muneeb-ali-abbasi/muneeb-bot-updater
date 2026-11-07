@@ -13,12 +13,13 @@
 const fs   = require('fs');
 const path = require('path');
 
-// lowercase naam  ->  sahi naam (jo code me likha hai)
+// lowercase naam  ->  sahi naam. 'panel' ka sahi naam code dekh kar tay hota hai (neeche detectPanelName)
 const CANONICAL = {
   commands: 'commands',
   utils   : 'utils',
-  panel   : 'Panel',
+  panel   : null,
 };
+const SKIP_SCAN = new Set(['node_modules', 'sessions', 'session', 'data', 'tmp', 'temp', 'bin', '.git', '.cache', 'database']);
 // In folders ke andar ke sub-folders ka naam hamesha lowercase hona chahiye
 const LOWERCASE_CHILDREN = new Set(['commands']);
 
@@ -60,17 +61,55 @@ function fixOne(parent, wrongName, rightName, log) {
   log.push(`${wrongName} merged into ${rightName}`);
 }
 
+
+// Poore code me dekho: require('./panel/server') zyada hai ya require('./Panel/server')
+function countPanelRefs(dir, out, depth = 0) {
+  if (depth > 6) return out;
+  let entries = [];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+  for (const e of entries) {
+    if (e.isSymbolicLink()) continue;
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) {
+      if (SKIP_SCAN.has(e.name)) continue;
+      countPanelRefs(full, out, depth + 1);
+    } else if (e.name.endsWith('.js')) {
+      try {
+        if (fs.statSync(full).size > 1_500_000) continue;
+        const src = fs.readFileSync(full, 'utf8');
+        const re = /['"`][^'"`\n]*\b(Panel|panel)\/(server|sessionManager|serverRegistry)\b/g;
+        let m; while ((m = re.exec(src))) out[m[1]]++;
+      } catch {}
+    }
+  }
+  return out;
+}
+
+function detectPanelName(rootDir) {
+  const c = countPanelRefs(rootDir, { Panel: 0, panel: 0 });
+  const names = (() => { try { return fs.readdirSync(rootDir); } catch { return []; } })();
+  let primary;
+  if (c.Panel > c.panel) primary = 'Panel';
+  else if (c.panel > c.Panel) primary = 'panel';
+  else primary = names.includes('Panel') && !names.includes('panel') ? 'Panel' : 'panel';
+  return { primary, other: primary === 'Panel' ? 'panel' : 'Panel', otherUsed: c[primary === 'Panel' ? 'panel' : 'Panel'] > 0 };
+}
+
 /**
  * @param {string} rootDir  project root (ya update ka extracted root)
  * @returns {string[]} kya kya badla (khali = sab theek tha)
  */
 function fixCase(rootDir) {
   const log = [];
+  let panel = null;
   try {
+    panel = detectPanelName(rootDir);
+    CANONICAL.panel = panel.primary;
     for (const name of fs.readdirSync(rootDir)) {
       const full = path.join(rootDir, name);
       const right = CANONICAL[name.toLowerCase()];
-      if (!right || name === right || !isDir(full)) continue;
+      let isLink = false; try { isLink = fs.lstatSync(full).isSymbolicLink(); } catch {}
+      if (!right || name === right || isLink || !isDir(full)) continue;
       try { fixOne(rootDir, name, right, log); } catch (e) { log.push(`FAILED ${name}: ${e.message}`); }
     }
     for (const parentName of LOWERCASE_CHILDREN) {
@@ -80,6 +119,14 @@ function fixCase(rootDir) {
         const lower = name.toLowerCase();
         if (name === lower || !isDir(path.join(parentDir, name))) continue;
         try { fixOne(parentDir, name, lower, log); } catch (e) { log.push(`FAILED ${parentName}/${name}: ${e.message}`); }
+      }
+    }
+    // Code me dono naam (Panel/ aur panel/) use hote hon to doosre naam ka shortcut (symlink) bana do — dono chalenge
+    if (panel && panel.otherUsed) {
+      const names = fs.readdirSync(rootDir);
+      if (names.includes(panel.primary) && !names.some(n => n.toLowerCase() === panel.other.toLowerCase() && n === panel.other)) {
+        try { fs.symlinkSync(panel.primary, path.join(rootDir, panel.other), 'dir'); log.push(`alias ${panel.other} -> ${panel.primary}`); }
+        catch (e) { if (e.code !== 'EEXIST') log.push(`alias FAILED: ${e.message}`); }
       }
     }
   } catch (e) { log.push(`FAILED: ${e.message}`); }
