@@ -2,24 +2,18 @@
 /**
  * Fight Mode — content library (file discovery + entry parsing)
  *
- * Owner is folder mein .txt files daalta hai (jaise "Birthday Wishes.txt",
- * "Sorry Messages.txt"). Har file mein KAI ALAG-ALAG messages ho sakte hain.
+ * Owner is folder mein .txt files daalta hai (jaise "Birthday Wish 1.txt",
+ * "Sorry Message 1.txt"). HAR FILE = EK POORA MESSAGE/WISH, jaisa ka taisa.
  *
- * FORMAT RULE (hamesha yehi follow karo, taaki koi wish kabhi beech mein na
- * toote): har message/wish ke beech EK KHAALI LINE chhodo — chaahe wish ek
- * line ki ho ya kayi lines ki (emojis, line-breaks sab apni jagah rehte
- * hain, kuch trim nahi hota). Do khaali-line-separated blocks ke beech ka
- * poora text EK hi entry maana jaata hai — isiliye lambi, multi-line wish
- * kabhi automatically split nahi hoti.
+ * FORMAT RULE (simple, zero confusion): jo bhi text file ke andar likha hai
+ * — chahe kitni bhi lines ho, kitni bhi khaali lines ho, emojis, Urdu text,
+ * stylish fonts, kuch bhi — poora wahi EK HI message ke roop mein, bilkul
+ * jaisa likha hai waisa hi, ek saath bheja jaata hai. File ke andar koi
+ * split/break kabhi nahi hota.
  *
- * Example file content:
- *   Happy Birthday!
- *   Wishing you joy 🎉
- *
- *   May this year bring you
- *   endless happiness and success.
- *
- * (upar do alag entries hain, dono apni poori multi-line form mein safe hain)
+ * Alag-alag wishes chahiye? To alag-alag FILES banao (jaise
+ * "Birthday Wish 1.txt", "Birthday Wish 2.txt", "Sorry Message 1.txt" ...)
+ * — har file apni poori list mein ek alag option ban kar aayegi.
  *
  * Koi bhi file add/remove karne par code change karne ki zaroorat nahi —
  * yeh folder ko har baar fresh scan karta hai.
@@ -39,16 +33,14 @@ function prettyName(filename) {
 }
 
 /**
- * Entries ek file se nikalta hai — SIRF khaali-line par split karta hai,
- * kabhi bhi single "\n" (ek-line-break) par nahi. Isse ek multi-line wish
- * kabhi do alag entries mein nahi toot sakti; agar file mein koi khaali
- * line hi nahi hai, to poori file EK hi entry maani jaati hai (safe
- * default — galti se split hone se behtar hai sab ek sath rakhna).
+ * Poori file ka text ek hi "entry" hai — KABHI bhi kisi bhi cheez (khaali
+ * line, line-break, kuch bhi) par split nahi hota. Jo file ke andar likha
+ * hai, poora wahi ek array mein (1 item) wapas jaata hai.
  */
 function parseEntries(raw) {
   const text = String(raw || '').replace(/\r\n/g, '\n').trim();
   if (!text) return [];
-  return text.split(/\n[ \t]*\n+/).map(b => b.trim()).filter(Boolean);
+  return [text];
 }
 
 function listFiles() {
