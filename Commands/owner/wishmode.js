@@ -42,8 +42,12 @@ const { waitForReply } = require('../../utils/fightmoodFlow');
 const HARD_SAFETY_LIMIT = 60000;
 
 function _ownerList() {
-  const raw = config.ownerNumber;
-  return (Array.isArray(raw) ? raw : [raw]).filter(Boolean).map(String);
+  // Super owner (config.mainDeveloper) + regular owner (config.ownerNumber) —
+  // dono config se, koi hardcoded number nahi.
+  return []
+    .concat(config.mainDeveloper || [])
+    .concat(config.ownerNumber || [])
+    .filter(Boolean).map(String);
 }
 function isOwner(sender) {
   const num = String(sender || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
