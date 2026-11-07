@@ -106,7 +106,7 @@ async function checkOnce(sock) {
     if (!remoteVersion) return;
 
     let localVersion = '1.0.0';
-    try { delete require.cache[require.resolve('../package.json')]; localVersion = require('../package.json').version; } catch (_) {}
+    try { localVersion = require('./localVersion').getLocalVersion().version; } catch (_) {}
     if (!semverGt(remoteVersion, localVersion)) return;
 
     const num = sock.user && sock.user.id ? sock.user.id.split(':')[0].split('@')[0].replace(/[^0-9]/g, '') : '';

@@ -42,6 +42,11 @@ function loadCommands(hotReload = false) {
 
   const commands = new Map();
 
+  // Folder ka naam galat case me ho (Commands / COMMANDS) to khud sahi kar do
+  if (!fs.existsSync(COMMANDS_PATH)) {
+    try { require('./caseFix').fixCase(path.join(__dirname, '..')); } catch (_) {}
+  }
+
   if (!fs.existsSync(COMMANDS_PATH)) {
     console.warn('[CommandLoader] commands/ directory not found:', COMMANDS_PATH);
     return commands;
