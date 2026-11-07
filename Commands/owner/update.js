@@ -114,6 +114,7 @@ function copyRecursive(src, dest, preserve, relPath = '', copied = []) {
     const srcPath  = path.join(src,  entry);
     const destPath = path.join(dest, entry);
     const stat     = fs.lstatSync(srcPath);
+    if (stat.isSymbolicLink()) continue;          // zip ke andar ke shortcuts copy nahi karte (EISDIR error wajah)
     if (stat.isDirectory()) {
       copyRecursive(srcPath, destPath, new Set(), path.join(relPath, entry), copied);
     } else {
@@ -132,29 +133,35 @@ async function updateViaZip(zipUrl, statusFn) {
   const zipPath   = path.join(tmpDir, `update_${Date.now()}.zip`);
   const extractTo = path.join(tmpDir, `update_extract_${Date.now()}`);
 
-  await statusFn('⬇️ Downloading update from GitHub…');
-  await downloadFile(zipUrl, zipPath);
+  let copied;
+  try {
+    await statusFn('⬇️ Downloading update from GitHub…');
+    await downloadFile(zipUrl, zipPath);
 
-  await statusFn('📦 Extracting…');
-  if (fs.existsSync(extractTo)) fs.rmSync(extractTo, { recursive: true, force: true });
-  await extractZip(zipPath, extractTo);
+    await statusFn('📦 Extracting…');
+    if (fs.existsSync(extractTo)) fs.rmSync(extractTo, { recursive: true, force: true });
+    await extractZip(zipPath, extractTo);
 
-  const entries       = fs.readdirSync(extractTo);
-  const rootCandidate = entries.length === 1 ? path.join(extractTo, entries[0]) : extractTo;
-  const srcRoot       = (fs.existsSync(rootCandidate) && fs.lstatSync(rootCandidate).isDirectory())
-    ? rootCandidate : extractTo;
+    const entries       = fs.readdirSync(extractTo);
+    const rootCandidate = entries.length === 1 ? path.join(extractTo, entries[0]) : extractTo;
+    const srcRoot       = (fs.existsSync(rootCandidate) && fs.lstatSync(rootCandidate).isDirectory())
+      ? rootCandidate : extractTo;
 
-  // Zip ke andar folder-names ka case sahi karo (Commands -> commands, panel -> Panel ...) copy se PEHLE
-  try { require('../../utils/caseFix').fixCase(srcRoot); } catch (e) { console.warn('[Update] caseFix(src):', e.message); }
+    await statusFn('📋 Copying new files (preserving your data)…');
+    copied = copyRecursive(srcRoot, cwd, PRESERVE);
 
-  await statusFn('📋 Copying new files (preserving your data)…');
-  const copied = copyRecursive(srcRoot, cwd, PRESERVE);
-
-  // Server par pehle se galat-case folder (purana Commands/) pada ho to usse bhi sahi/merge kar do
-  try { require('../../utils/caseFix').fixCase(cwd); } catch (e) { console.warn('[Update] caseFix(cwd):', e.message); }
-
-  try { fs.rmSync(extractTo, { recursive: true, force: true }); } catch {}
-  try { fs.unlinkSync(zipPath); } catch {}
+    // Server par pehle se galat-case folder (purana Commands/) pada ho to usse bhi sahi/merge kar do
+    // (cache clear: abhi-abhi copy hui NAYI caseFix.js use ho, purani memory wali nahi)
+    try {
+      const cfPath = require.resolve('../../utils/caseFix');
+      delete require.cache[cfPath];
+      require(cfPath).fixCase(cwd);
+    } catch (e) { console.warn('[Update] caseFix(cwd):', e.message); }
+  } finally {
+    // success ho ya fail — tmp ka zip / extract folder hamesha saaf (pehle fail par pada rehta tha)
+    try { fs.rmSync(extractTo, { recursive: true, force: true }); } catch {}
+    try { fs.unlinkSync(zipPath); } catch {}
+  }
 
   return copied;
 }
