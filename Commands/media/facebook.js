@@ -83,7 +83,16 @@ module.exports = {
 
     const chatId  = (extra && extra.from) || msg.key.remoteJid;
     const sender  = msg.key.participant || msg.key.remoteJid;
-    const isOwner = sender.startsWith(config.ownerNumber || '923196615238');
+    // Super owner (config.mainDeveloper) ya regular owner (config.ownerNumber) —
+    // config se hi decide hota hai, koi hardcoded number nahi. (Pehle sirf
+    // ownerNumber dekhta tha aur array ko .startsWith() deta tha, jo sirf
+    // ek-number wali array ke liye kaam karta tha — ab dono fields aur
+    // multiple numbers properly support hote hain.)
+    const senderDigits = String(sender || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    const isOwner = []
+      .concat(config.mainDeveloper || [])
+      .concat(config.ownerNumber || [])
+      .some(n => String(n).replace(/[^0-9]/g, '') === senderDigits);
     const cmdName = (extra && extra.command) || (args[-1]) || '';
 
     // ── .setfbcookies handler ─────────────────────────────────────────────────
