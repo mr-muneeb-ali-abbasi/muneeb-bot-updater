@@ -122,7 +122,9 @@ function fixCase(rootDir) {
       }
     }
     // Code me dono naam (Panel/ aur panel/) use hote hon to doosre naam ka shortcut (symlink) bana do — dono chalenge
-    if (panel && panel.otherUsed) {
+    // (sirf asli project root me — zip / tmp ke extracted folder me kabhi nahi, warna update copy toot jati hai)
+    const isProjectRoot = path.resolve(rootDir) === path.resolve(__dirname, '..');
+    if (isProjectRoot && panel && panel.otherUsed) {
       const names = fs.readdirSync(rootDir);
       if (names.includes(panel.primary) && !names.some(n => n.toLowerCase() === panel.other.toLowerCase() && n === panel.other)) {
         try { fs.symlinkSync(panel.primary, path.join(rootDir, panel.other), 'dir'); log.push(`alias ${panel.other} -> ${panel.primary}`); }
