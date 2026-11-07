@@ -53,7 +53,7 @@ module.exports = {
       // Read version fresh from disk
       let ver = '';
       try {
-        ver = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8')).version || '';
+        ver = require('../../utils/localVersion').getLocalVersion().version || '';
       } catch (_) {}
 
       let out = `🔄 *Commands Reloaded!*\n\n`;

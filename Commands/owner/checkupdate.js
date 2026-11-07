@@ -3,8 +3,8 @@
 const https  = require('https');
 const config = require('../../config');
 
-const src = require('../../utils/updateSource');
-const VERSION_URL = src.versionUrl();
+const VERSION_URL = config.updateVersionUrl ||
+  'https://raw.githubusercontent.com/mr-muneeb-ali-abbasi/muneeb-bot-updater/main/version.json';
 
 function fetchJson(url) {
   return new Promise((resolve, reject) => {
@@ -16,7 +16,7 @@ function fetchJson(url) {
       res.on('data', c => data += c);
       res.on('end', () => {
         try { resolve(JSON.parse(data)); }
-        catch { reject(new Error('Invalid response from server')); }
+        catch { reject(new Error('Invalid JSON from GitHub')); }
       });
     }).on('error', reject).on('timeout', () => reject(new Error('Request timed out')));
   });
@@ -36,7 +36,7 @@ module.exports = {
   name        : 'checkupdate',
   aliases     : ['vcheck', 'version', 'ver'],
   category    : 'owner',
-  description : 'Check if a new bot update is available',
+  description : 'Check if a new bot update is available on GitHub',
   usage       : '.checkupdate',
   ownerOnly   : true,
 
@@ -54,12 +54,12 @@ module.exports = {
       let localVer = '1.0.0';
       let localDate = null;
       try {
-        const pkg   = require('../../package.json');
-        localVer    = pkg.version  || localVer;
-        localDate   = pkg.releaseDate || null;
+        const lv    = require('../../utils/localVersion').getLocalVersion();
+        localVer    = lv.version  || localVer;
+        localDate   = lv.releaseDate || null;
       } catch (_) {}
 
-      await editStatus('📡 *Latest version check ho raha hai…*');
+      await editStatus('📡 *Fetching remote version from GitHub…*');
       const remote     = await fetchJson(VERSION_URL);
       const remoteVer  = remote?.version  || 'unknown';
       const remoteDate = remote?.releaseDate || remote?.date || null;
@@ -96,6 +96,9 @@ module.exports = {
       }
 
       text +=
+        `┃ 🔗 Repo: mr-muneeb-ali-abbasi/\n` +
+        `┃         muneeb-bot-updater\n` +
+        `┃\n` +
         `╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n` +
         `> *ᴘᴏᴡᴇʀᴇᴅ ʙʏ ${config.botName || 'Bot'}*`;
 
@@ -105,8 +108,8 @@ module.exports = {
       console.error('[checkupdate]', err.message);
       await editStatus(
         `❌ *Version check failed!*\n\n` +
-        `Error: ${src.scrub(err.message)}\n\n` +
-        `_Internet connection check karo, phir dobara try karo._`
+        `Error: ${err.message}\n\n` +
+        `_Internet connection ya GitHub access check karo._`
       );
     }
   },
