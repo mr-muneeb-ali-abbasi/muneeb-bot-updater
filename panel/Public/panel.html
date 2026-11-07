@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mr.Muneeb Ali Bot — Admin Panel</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/style.css" />
+  <style>
+    /* ── Lock Screen ── */
+    #lock-screen {
+      position: fixed; inset: 0; z-index: 9999;
+      background: #0f0f13;
+      display: flex; align-items: center; justify-content: center;
+      flex-direction: column;
+    }
+    #lock-screen .lock-card {
+      background: #17171e;
+      border: 1px solid #2a2a3a;
+      border-radius: 16px;
+      padding: 40px 36px;
+      width: 100%; max-width: 400px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      text-align: center;
+    }
+    #lock-screen .lock-icon { font-size: 48px; margin-bottom: 12px; }
+    #lock-screen h2 { font-size: 20px; font-weight: 700; color: #25d366; margin-bottom: 4px; }
+    #lock-screen p  { font-size: 13px; color: #a0a0b0; margin-bottom: 24px; }
+    #lock-screen .lock-input {
+      width: 100%; padding: 12px 16px;
+      background: #0f0f13; border: 1px solid #2a2a3a;
+      border-radius: 8px; color: #f0f0f0; font-size: 15px;
+      font-family: inherit; outline: none;
+      transition: border-color .2s;
+      margin-bottom: 12px;
+      letter-spacing: 2px;
+    }
+    #lock-screen .lock-input:focus { border-color: #25d366; }
+    #lock-screen .lock-btn {
+      width: 100%; padding: 12px;
+      background: #25d366; color: #000; font-weight: 700; font-size: 15px;
+      border: none; border-radius: 8px; cursor: pointer;
+      font-family: inherit; transition: background .2s, transform .1s;
+    }
+    #lock-screen .lock-btn:hover  { background: #1fbc59; }
+    #lock-screen .lock-btn:active { transform: scale(.98); }
+    #lock-screen .lock-error {
+      color: #ff4d4d; font-size: 13px; margin-top: 10px;
+      min-height: 18px; display: none;
+    }
+    #lock-screen .lock-error.show { display: block; }
+    #lock-screen .lock-hint {
+      margin-top: 20px; font-size: 12px; color: #555;
+    }
+  </style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════
+     LOCK SCREEN (shown until authenticated)
+════════════════════════════════════════════════ -->
+<div id="lock-screen">
+  <div class="lock-card">
+    <div class="lock-icon">🔐</div>
+    <h2>Mr.Muneeb Ali Bot</h2>
+    <p>Admin Panel — Password required to continue</p>
+    <input
+      type="password"
+      id="lock-password"
+      class="lock-input"
+      placeholder="Enter password..."
+      autocomplete="off"
+      autofocus
+    />
+    <button class="lock-btn" id="lock-submit">🔓 Enter Panel</button>
+    <div class="lock-error" id="lock-error">❌ Galat password! Dobara try karo.</div>
+    <div class="lock-hint">Only authorized admins can access this panel.</div>
+  </div>
+</div>
+
+<div class="app" id="main-app" style="display:none;">
+
+  <!-- ── Header ── -->
+  <header class="header">
+    <div class="header-inner">
+      <div class="logo">
+        <div class="logo-icon">🤖</div>
+        <div class="logo-text">
+          <h1>Mr.Muneeb Ali Bot</h1>
+          <span>Admin Panel</span>
+        </div>
+      </div>
+      <div class="header-stats">
+        <div class="stat-chip">
+          <span class="dot dot-green"></span>
+          <strong id="connected-count">0</strong>&nbsp;connected
+        </div>
+        <div class="stat-chip">
+          📊 <strong id="total-count">0</strong>&nbsp;total
+        </div>
+        <div class="stat-chip">
+          ⏱ <span id="uptime">0s</span>
+        </div>
+        <button class="btn btn-ghost btn-sm" onclick="panelLogout()" title="Logout" style="font-size:12px;">🔒 Logout</button>
+        <a href="/" class="btn btn-ghost btn-sm" style="text-decoration:none;">🏠 Home</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Main ── -->
+  <main class="main">
+    <div class="actions-bar">
+      <h2>Bot Sessions</h2>
+      <button class="btn btn-primary" id="btn-add-session">＋ Add Session</button>
+    </div>
+
+    <div class="sessions-grid" id="sessions-grid">
+      <!-- Empty state (shown when no sessions) -->
+      <div class="empty-state" id="empty-state">
+        <div class="empty-icon">🤖</div>
+        <h3>No Sessions Yet</h3>
+        <p>Create your first bot session to get started.</p>
+        <button class="btn btn-primary" id="btn-add-first">＋ Add First Session</button>
+      </div>
+    </div>
+  </main>
+
+</div><!-- /app -->
+
+<!-- ══════════════════════════════════════════════
+     MODAL: Add Session
+════════════════════════════════════════════════ -->
+<div class="modal-overlay" id="modal-add">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>➕ Add New Session</h3>
+      <button class="modal-close" onclick="closeModal('modal-add')">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label>Session Name</label>
+        <input type="text" id="input-session-name" placeholder="e.g. My Bot" maxlength="40" />
+        <small>Give your bot session a recognisable name.</small>
+      </div>
+      <div class="form-group">
+        <label>Owner WhatsApp Number</label>
+        <input type="tel" id="input-owner-number" placeholder="e.g. 923001234567" maxlength="15" />
+        <small>Enter with country code, no + or spaces. This person can control the bot.</small>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('modal-add')">Cancel</button>
+      <button class="btn btn-primary" id="btn-create-session">Create Session</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     MODAL: Connect (QR / Pairing Code)
+════════════════════════════════════════════════ -->
+<div class="modal-overlay" id="modal-qr">
+  <div class="modal modal-qr">
+    <div class="modal-header">
+      <h3>📱 Connect WhatsApp</h3>
+      <button class="modal-close" onclick="closeModal('modal-qr')">×</button>
+    </div>
+    <div class="qr-body">
+
+      <!-- Tabs -->
+      <div class="qr-tabs">
+        <button class="tab-btn active" id="tab-qr" onclick="switchTab('qr')">📷 QR Code</button>
+        <button class="tab-btn" id="tab-pair" onclick="switchTab('pair')">🔢 Pairing Code</button>
+      </div>
+
+      <!-- QR Tab -->
+      <div class="tab-panel active" id="panel-qr">
+        <p class="qr-instructions">Open WhatsApp → ⋮ Menu → Linked Devices → Link a Device → Scan this QR.</p>
+        <div class="qr-container">
+          <img id="qr-image" src="" alt="QR Code" style="display:none;" />
+          <div class="qr-loading" id="qr-loading">
+            <div class="spinner"></div>
+            <span>Generating QR code…</span>
+          </div>
+          <div class="qr-expired" id="qr-expired" style="display:none;">
+            <p>QR expired.</p>
+            <button class="btn btn-outline btn-sm" onclick="refreshQR()">↻ Refresh</button>
+          </div>
+        </div>
+        <p class="qr-tip">QR refreshes automatically every 30 seconds.</p>
+      </div>
+
+      <!-- Pairing Code Tab -->
+      <div class="tab-panel" id="panel-pair">
+        <p class="qr-instructions">Get an 8-digit code to link without scanning QR.</p>
+        <div class="form-group" style="margin-top:12px;">
+          <label>WhatsApp Number (with country code)</label>
+          <input type="tel" id="pair-phone" placeholder="e.g. 923001234567" maxlength="15" />
+          <small>Example: Pakistan → 923001234567</small>
+        </div>
+        <button class="btn btn-primary" id="btn-get-paircode" onclick="getPairCode()" style="width:100%;">Get Pairing Code</button>
+        <div class="pair-code-display" id="pair-code-result" style="display:none;">
+          <p>Your pairing code:</p>
+          <div class="pair-code" id="pair-code-text"></div>
+          <p class="pair-instructions">
+            Open WhatsApp → Linked Devices → Link a Device<br/>
+            → "Link with phone number instead" → Enter code above
+          </p>
+        </div>
+      </div>
+
+    </div><!-- /qr-body -->
+  </div>
+</div>
+
+<!-- ── Toast Container ── -->
+<div id="toast-container"></div>
+
+<script>
+  // ── Backend URL: panel.html hamesha USI backend se serve hoti hai jise yeh
+  // manage karti hai (same origin, /manage ya /panel route se) — isliye koi
+  // discovery (Gist / localtunnel / hardcoded Cloudflare URL) ki zaroorat
+  // hi nahi. Khaali string = relative fetch ('' + '/api/panel/check' =
+  // '/api/panel/check'), jo hamesha sahi backend par jayega, chahe
+  // Cloudflare ka URL restart ke baad kitni baar bhi badal jaye.
+  window.BACKEND_URL = '';
+  window.BACKEND_READY = Promise.resolve('');
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.8.3/socket.io.min.js"></script>
+<script>
+// ── Panel auth flow ──────────────────────────────────────────────────────────
+(async function initPanelAuth() {
+  await window.BACKEND_READY; // make sure we're using whichever backend actually responded
+  const lockScreen = document.getElementById('lock-screen');
+  const mainApp    = document.getElementById('main-app');
+  const pwInput    = document.getElementById('lock-password');
+  const submitBtn  = document.getElementById('lock-submit');
+  const errDiv     = document.getElementById('lock-error');
+
+  async function checkAuth() {
+    try {
+      const r = await fetch(window.BACKEND_URL + '/api/panel/check', {
+        credentials: 'include',
+        headers: { 'Bypass-Tunnel-Reminder': 'true' }
+      });
+      const d = await r.json();
+      return d.authed === true;
+    } catch (_) { return false; }
+  }
+
+  function showPanel() {
+    lockScreen.style.display = 'none';
+    mainApp.style.display    = 'flex';
+    mainApp.style.flexDirection = 'column';
+  }
+
+  async function tryLogin() {
+    const pw = pwInput.value;
+    if (!pw) return;
+    submitBtn.disabled = true;
+    submitBtn.textContent = '⏳ Checking...';
+    errDiv.classList.remove('show');
+    try {
+      const r = await fetch(window.BACKEND_URL + '/api/panel/login', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json', 'Bypass-Tunnel-Reminder': 'true' },
+        body: JSON.stringify({ password: pw })
+      });
+      const d = await r.json();
+      if (d.success) {
+        showPanel();
+      } else {
+        errDiv.textContent = d.error || '❌ Galat password!';
+        errDiv.classList.add('show');
+        pwInput.value = '';
+        pwInput.focus();
+      }
+    } catch (_) {
+      errDiv.textContent = '❌ Server se connection fail. Reload karo.';
+      errDiv.classList.add('show');
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = '🔓 Enter Panel';
+    }
+  }
+
+  submitBtn.addEventListener('click', tryLogin);
+  pwInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') tryLogin(); });
+
+  // Check if already authenticated
+  if (await checkAuth()) showPanel();
+})();
+
+// ── Logout function ──────────────────────────────────────────────────────────
+async function panelLogout() {
+  await window.BACKEND_READY;
+  await fetch(window.BACKEND_URL + '/api/panel/logout', {
+    credentials: 'include',
+    headers: { 'Bypass-Tunnel-Reminder': 'true' }
+  });
+  location.reload();
+}
+</script>
+<script>
+  // Load app.js only after we know which backend URL actually works —
+  // avoids app.js's socket.io connection using a stale/wrong default.
+  window.BACKEND_READY.then(() => {
+    const s = document.createElement('script');
+    s.src = '/app.js';
+    document.body.appendChild(s);
+  });
+</script>
+<script>
+  // Wire up "Add First Session" button in empty state
+  document.getElementById('btn-add-first').addEventListener('click', () => {
+    document.getElementById('btn-add-session').click();
+  });
+</script>
+</body>
+</html>
