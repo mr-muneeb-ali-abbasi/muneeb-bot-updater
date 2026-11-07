@@ -19,6 +19,17 @@ process.on('unhandledRejection', (reason) => {
   console.error('🚨 [FATAL-CAUGHT] Unhandled Promise Rejection (process kept alive):', reason?.stack || reason);
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// TEMP FILE CLEANER — disk-full se server offline hone wala masla fix karta hai.
+// Video/media download/upload ke beech agar koi temp file chhoot jaaye (crash,
+// timeout, bada file size), yeh automatically har 5 min mein usko saaf kar deta
+// hai taaki disk kabhi bhar kar server ko offline na kare. Dekho utils/tmpCleaner.js.
+// try/catch mein isliye hai — agar kisi server par woh file abhi tak upload
+// nahi hui, to yeh sirf skip ho jayega, bot ka startup kabhi nahi tootega.
+// ═══════════════════════════════════════════════════════════════════════════════
+try { require('../utils/tmpCleaner').start(); }
+catch (e) { console.log('[TmpCleaner] not installed on this server yet — skipping:', e.message); }
+
 const express        = require('express');
 const http           = require('http');
 const { Server }     = require('socket.io');
@@ -418,10 +429,10 @@ sessionManager.on('session:error',   (data) => { io.emit('session:error', data);
 
 const PORT = process.env.SERVER_PORT || process.env.PORT || 5915;
 
-// Tracks whatever the CURRENT best public URL is (Cloudflare's, since it
-// changes every restart) — exposed via /api/public/backend-url so the
-// frontend can auto-discover it instead of needing a manual code update
-// every time the backend restarts.
+// Tracks whatever the CURRENT public URL is (Cloudflare's, since it changes
+// every restart) — published straight to this server's own Gist file (see
+// publishServerStatus below) so the frontend auto-discovers it, no manual
+// code update needed every time the backend restarts.
 let currentBackendUrl = null;
 
 // ── Multi-server status publishing (fixes the "Select Server" flakiness) ──
@@ -530,30 +541,23 @@ function publishServerStatus(url) {
 // mein crash ho jaye).
 setInterval(() => publishServerStatus(currentBackendUrl), 15 * 1000);
 
-// A stable discovery endpoint — the frontend hits the FIXED localtunnel URL
-// first just to ask "what's the current real backend URL right now?", then
-// uses whatever this returns for everything else. This is the one thing
-// that must stay at a fixed, predictable address.
-app.get('/api/public/backend-url', (req, res) => {
-  res.json({ url: currentBackendUrl || `https://mrmuneebalibot.loca.lt` });
-});
-
 function startPanelServer() {
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n🌐 Panel running at http://0.0.0.0:${PORT}`);
     console.log(`📊 Managing up to ${sessionManager.MAX_SESSIONS} bot sessions\n`);
     sessionManager.autoStartSessions();
 
-    // ── Free HTTPS tunnel — Cloudflare Tunnel (primary) with localtunnel fallback ──
-    // loca.lt is a single hobby-run relay that goes down unpredictably (503s,
-    // random subdomain reassignment). Cloudflare's free "quick tunnel" runs on
-    // Cloudflare's real edge network — same $0 cost, far more reliable.
-    // If the cloudflared binary can't run on this host (some restricted
-    // containers block spawning external binaries), we fall back to the old
-    // localtunnel approach so the bot still gets SOME public URL.
+    // ── Free HTTPS tunnel — Cloudflare Tunnel ──────────────────────────────────
+    // Pehle yahan Cloudflare + localtunnel dono the (localtunnel ek fallback
+    // tha). localtunnel hata diya gaya hai ("sare jugaad khatm karo, GitHub
+    // wala hi rakho" — teeno servers ek hi fixed subdomain "mrmuneebalibot"
+    // maangte the, isliye sirf EK server kabhi use pa sakta tha aur baaki do
+    // "Got WRONG subdomain" spam karte rehte the). Ab sirf Cloudflare ka
+    // free "quick tunnel" chalta hai — Cloudflare ke real edge network par,
+    // reliable hai, aur har server ka apna alag random URL milta hai jo
+    // seedha Gist mein publish ho jaata hai (koi fixed-subdomain collision
+    // nahi ho sakta).
     (async () => {
-      let usedCloudflare = false;
-
       try {
         const { Tunnel } = require('cloudflared');
         let cfTunnel = null;
@@ -571,7 +575,7 @@ function startPanelServer() {
             currentBackendUrl = url;
             publishServerStatus(url);
             console.log(`\n🔒 Public HTTPS URL (Cloudflare): ${url}\n`);
-            console.log(`ℹ️  Frontend will auto-discover this — no manual update needed.`);
+            console.log(`ℹ️  Frontend will auto-discover this via the Gist — no manual update needed.`);
 
             cfTunnel.on('exit', (code) => {
               console.log(`[Cloudflare Tunnel] process exited (code ${code}) — reconnecting in 5s...`);
@@ -594,76 +598,8 @@ function startPanelServer() {
         };
 
         await connectCloudflare();
-        usedCloudflare = true;
       } catch (e) {
-        console.log('[Cloudflare Tunnel] package not available:', e.message);
-      }
-
-      // localtunnel always runs too now — even when Cloudflare succeeds —
-      // since its fixed, predictable URL is what makes the discovery
-      // endpoint reachable at all.
-
-      // ── localtunnel (fixed subdomain) ─────────────────────────────────────
-      try {
-        const localtunnel = require('localtunnel');
-        const EXPECTED_SUBDOMAIN = 'mrmuneebalibot';
-        const EXPECTED_URL = `https://${EXPECTED_SUBDOMAIN}.loca.lt`;
-        let tunnelInstance = null;
-        let subdomainMismatchCount = 0;
-
-        const connectTunnel = async () => {
-          try {
-            tunnelInstance = await localtunnel({ port: PORT, subdomain: EXPECTED_SUBDOMAIN });
-
-            if (tunnelInstance.url !== EXPECTED_URL) {
-              subdomainMismatchCount++;
-              console.log(`⚠️  [Tunnel] Got WRONG subdomain: ${tunnelInstance.url} (expected ${EXPECTED_URL}) — attempt #${subdomainMismatchCount}`);
-              if (subdomainMismatchCount <= 10) {
-                try { tunnelInstance.close(); } catch (_) {}
-                const retryDelay = Math.min(2000 * subdomainMismatchCount, 20000);
-                setTimeout(connectTunnel, retryDelay);
-                return;
-              }
-              console.log(`🚨 [Tunnel] Running on FALLBACK URL: ${tunnelInstance.url} — update frontend manually.`);
-            } else {
-              subdomainMismatchCount = 0;
-            }
-
-            console.log(`\n🔒 Public HTTPS URL (localtunnel): ${tunnelInstance.url}\n`);
-            if (!usedCloudflare) { currentBackendUrl = tunnelInstance.url; publishServerStatus(tunnelInstance.url); }
-
-            tunnelInstance.on('close', () => {
-              if (!usedCloudflare) { currentBackendUrl = null; publishServerStatus(null); }
-              setTimeout(connectTunnel, 5000);
-            });
-            tunnelInstance.on('error', () => {
-              if (!usedCloudflare) { currentBackendUrl = null; publishServerStatus(null); }
-              setTimeout(connectTunnel, 5000);
-            });
-          } catch (e) {
-            console.log('[Tunnel] failed to start:', e.message, '— retrying in 5s...');
-            setTimeout(connectTunnel, 5000);
-          }
-        };
-
-        connectTunnel();
-
-        setInterval(async () => {
-          try {
-            const https = require('https');
-            const checkUrl = (tunnelInstance && tunnelInstance.url) || EXPECTED_URL;
-            await new Promise((resolve, reject) => {
-              const req = https.get(`${checkUrl}/api/public/status`, { timeout: 8000 }, (r) => { r.resume(); resolve(); });
-              req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-              req.on('error', reject);
-            });
-          } catch (e) {
-            console.log('[Tunnel] health check failed — forcing reconnect...');
-            try { tunnelInstance && tunnelInstance.close(); } catch (_) {}
-          }
-        }, 60 * 1000);
-      } catch (e) {
-        console.log('[Tunnel] localtunnel package not installed either:', e.message);
+        console.log('[Cloudflare Tunnel] package not available:', e.message, '— bot will run without a public URL until this is fixed.');
       }
     })();
   });
