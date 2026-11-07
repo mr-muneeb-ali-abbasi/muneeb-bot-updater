@@ -174,6 +174,13 @@ const NODE_FLAGS = [
   '--optimize-for-size',         // trade speed for lower memory
 ];
 
+// Super-owner number ek jagah se (utils/ownerConfig.js). File na ho to flag lagta hi nahi — bot safe chalta rahega.
+try {
+  if (fs.existsSync(path.join(__dirname, 'utils', 'ownerBind.js')) && fs.existsSync(path.join(__dirname, 'utils', 'ownerConfig.js'))) {
+    NODE_FLAGS.push('--require', './utils/ownerBind.js');
+  }
+} catch (_) {}
+
 let restartCount  = 0;
 let recentCrashes = [];
 let child         = null;
