@@ -18,6 +18,7 @@ process.on('unhandledRejection',  (reason) => console.error('[FATAL] UnhandledRe
 
 const config   = require('./config');
 const database = require('./database');
+const sudoUtil = require('./utils/sudo');
 const { loadCommands }         = require('./utils/commandLoader');
 const { addMessage }           = require('./utils/groupstats');
 const { jidDecode, jidEncode, downloadMediaMessage } = require('@whiskeysockets/baileys');
@@ -578,6 +579,11 @@ const _handleMessageInner = async (sock, msg) => {
     const isOwner     = (sender) => isMainDeveloper(sender) || isConnectedOwner(sender);
     // isSuperAdmin = Level 1 ONLY   (super-admin commands like broadcast, restart, etc.)
     const isSuperAdmin = (sender) => isMainDeveloper(sender);
+
+    // Sudo — .addsudo se diya gaya, is bot ke liye. selfMode/mod-only gate
+    // bypass karta hai jaisa owner, LEKIN ownerOnly/superAdminOnly commands
+    // kabhi bypass nahi karta (woh checks neeche alag se hain, inhe nahi chheda).
+    const isSudo = (sender) => { try { return sudoUtil.isSudo(sock.user?.id, sender); } catch (_) { return false; } };
 
     if (!msg.message) return;
     const from = msg.key.remoteJid;
@@ -1401,7 +1407,7 @@ const _handleMessageInner = async (sock, msg) => {
     if (!command) return;
 
     try {
-      if (!isOwner(sender) && database.isBanned(sender)) {
+      if (!isOwner(sender) && !isSudo(sender) && database.isBanned(sender)) {
         return sock.sendMessage(from, {
           text: `🚫 *Tum ban ho!*\n\nTumhein bot commands use karne se ban kar diya gaya hai.\nOwner se contact karo unban ke liye.`,
         }, { quoted: msg });
@@ -1410,12 +1416,12 @@ const _handleMessageInner = async (sock, msg) => {
 
     // Per-session selfMode — each bot session has its own private/public setting
     const _sessionSelfMode = database.getBotSetting(sock.user?.id, 'selfMode', config.selfMode || false);
-    if (_sessionSelfMode && !isOwner(sender)) return;
+    if (_sessionSelfMode && !isOwner(sender) && !isSudo(sender)) return;
     if (command.superAdminOnly && !isSuperAdmin(sender))
       return sock.sendMessage(from, { text: '❌ *This command is reserved for Main Developer only.*' }, { quoted: msg });
     if (command.ownerOnly && !isOwner(sender))
       return sock.sendMessage(from, { text: config.messages.ownerOnly }, { quoted: msg });
-    if (command.modOnly && !isMod(sender) && !isOwner(sender)) return sock.sendMessage(from, { text: '🔒 This command is only for moderators!' }, { quoted: msg });
+    if (command.modOnly && !isMod(sender) && !isOwner(sender) && !isSudo(sender)) return sock.sendMessage(from, { text: '🔒 This command is only for moderators!' }, { quoted: msg });
     if (command.groupOnly && !isGroup)  return sock.sendMessage(from, { text: config.messages.groupOnly }, { quoted: msg });
     if (command.privateOnly && isGroup) return sock.sendMessage(from, { text: config.messages.privateOnly }, { quoted: msg });
     // Admin-type group commands: only the leader bot (the admin one) answers — the other bots stay silent.
@@ -1443,6 +1449,7 @@ const _handleMessageInner = async (sock, msg) => {
       isSuperAdmin:    isSuperAdmin(sender),
       isMainDeveloper: isMainDeveloper(sender),
       isConnectedOwner:isConnectedOwner(sender),
+      isSudo:          isSudo(sender),
       botId:           sock.user?.id || null,
       isAdmin:    await isAdmin(sock, sender, from, groupMetadata),
       isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
