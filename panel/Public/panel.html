@@ -53,6 +53,125 @@
     #lock-screen .lock-hint {
       margin-top: 20px; font-size: 12px; color: #555;
     }
+
+    /* ══════════════════════════════════════════════
+       ADMIN DASHBOARD (was missing — panel.html had
+       no styling at all for anything past the lock
+       screen, which is why it looked "broken"/unstyled)
+    ══════════════════════════════════════════════ */
+    .app { min-height: 100vh; background: var(--bg); }
+    .header {
+      position: sticky; top: 0; z-index: 50;
+      background: #0f0f13; border-bottom: 1px solid #2a2a3a;
+    }
+    .header-inner {
+      max-width: 1180px; margin: 0 auto; padding: 14px 24px;
+      display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;
+    }
+    .logo { display: flex; align-items: center; gap: 10px; }
+    .logo-icon { font-size: 28px; }
+    .logo-text h1 { margin: 0; font-size: 16px; color: #f0f0f0; }
+    .logo-text span { font-size: 12px; color: #25d366; }
+    .header-stats { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .stat-chip {
+      display: flex; align-items: center; gap: 6px;
+      background: #17171e; border: 1px solid #2a2a3a; border-radius: 999px;
+      padding: 6px 12px; font-size: 13px; color: #d0d0da;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .dot-green { background: #25d366; box-shadow: 0 0 8px #25d366; }
+    .dot-red { background: #ff4d4d; }
+    .dot-amber { background: #ffb13b; }
+    .main { max-width: 1180px; margin: 0 auto; padding: 24px; }
+    .actions-bar {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 18px; flex-wrap: wrap; gap: 12px;
+    }
+    .actions-bar h2 { margin: 0; font-size: 18px; color: #f0f0f0; }
+    .sessions-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px;
+    }
+    .empty-state {
+      grid-column: 1 / -1; text-align: center; padding: 60px 20px;
+      background: #17171e; border: 1px dashed #2a2a3a; border-radius: 16px;
+    }
+    .empty-icon { font-size: 44px; margin-bottom: 10px; }
+    .empty-state h3 { margin: 0 0 6px; color: #f0f0f0; }
+    .empty-state p { margin: 0 0 18px; color: #9fb3c8; font-size: 13px; }
+
+    .session-card {
+      background: #17171e; border: 1px solid #2a2a3a; border-radius: 14px;
+      padding: 18px; display: flex; flex-direction: column; gap: 12px;
+      border-left: 3px solid #555;
+    }
+    .session-card.st-connected { border-left-color: #25d366; }
+    .session-card.st-qr_ready, .session-card.st-pairing, .session-card.st-connecting { border-left-color: #ffb13b; }
+    .session-card.st-error, .session-card.st-disconnected { border-left-color: #ff4d4d; }
+    .session-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+    .session-name { font-size: 15px; font-weight: 600; color: #f0f0f0; margin: 0 0 4px; }
+    .session-meta { font-size: 12px; color: #9fb3c8; line-height: 1.5; }
+    .session-status {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 999px;
+      text-transform: uppercase; letter-spacing: .03em; white-space: nowrap;
+    }
+    .session-status.st-connected { color: #25d366; background: rgba(37,211,102,.12); }
+    .session-status.st-qr_ready, .session-status.st-pairing, .session-status.st-connecting { color: #ffb13b; background: rgba(255,177,59,.12); }
+    .session-status.st-idle { color: #9fb3c8; background: rgba(159,179,200,.1); }
+    .session-status.st-error, .session-status.st-disconnected { color: #ff4d4d; background: rgba(255,77,77,.12); }
+    .session-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; }
+    .session-actions .btn { flex: 1 1 auto; }
+
+    .modal { background: #17171e; border: 1px solid #2a2a3a; border-radius: 16px; width: 100%; max-width: 420px; }
+    .modal-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px 20px; border-bottom: 1px solid #2a2a3a;
+    }
+    .modal-header h3 { margin: 0; font-size: 16px; color: #f0f0f0; }
+    .modal-close {
+      background: none; border: none; color: #9fb3c8; font-size: 22px; line-height: 1;
+      cursor: pointer; padding: 0 4px;
+    }
+    .modal-close:hover { color: #f0f0f0; }
+    .modal-body { padding: 18px 20px; }
+    .modal-footer { display: flex; justify-content: flex-end; gap: 10px; padding: 14px 20px; border-top: 1px solid #2a2a3a; }
+    .form-group { margin-bottom: 14px; }
+    .form-group label { display: block; font-size: 12px; color: #9fb3c8; margin-bottom: 6px; }
+    .form-group input {
+      width: 100%; padding: 10px 12px; background: #0f0f13; border: 1px solid #2a2a3a;
+      border-radius: 8px; color: #f0f0f0; font-size: 14px; font-family: inherit; outline: none;
+    }
+    .form-group input:focus { border-color: #25d366; }
+    .form-group small { display: block; margin-top: 5px; font-size: 11px; color: #6b7c91; }
+
+    .modal-qr { max-width: 400px; }
+    .qr-tabs { display: flex; gap: 8px; padding: 14px 20px 0; }
+    .tab-btn {
+      flex: 1; padding: 9px; background: #0f0f13; border: 1px solid #2a2a3a; border-radius: 8px;
+      color: #9fb3c8; font-size: 13px; cursor: pointer; font-family: inherit;
+    }
+    .tab-btn.active { background: #25d366; color: #000; border-color: #25d366; font-weight: 600; }
+    .qr-body { padding: 18px 20px 20px; }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+    .qr-instructions { font-size: 12.5px; color: #9fb3c8; margin: 10px 0; text-align: center; }
+    .qr-tip { font-size: 11px; color: #6b7c91; text-align: center; margin-top: 10px; }
+    .qr-container {
+      display: flex; align-items: center; justify-content: center;
+      min-height: 220px; background: #0f0f13; border: 1px solid #2a2a3a; border-radius: 12px;
+    }
+    #qr-image { max-width: 220px; width: 100%; border-radius: 8px; background: #fff; padding: 8px; }
+    .qr-loading { display: flex; flex-direction: column; align-items: center; gap: 10px; color: #9fb3c8; font-size: 13px; }
+    .qr-expired { text-align: center; color: #ff4d4d; font-size: 13px; }
+    .pair-code-display { margin-top: 16px; text-align: center; }
+    .pair-code-display p { font-size: 12px; color: #9fb3c8; margin: 0 0 6px; }
+    .pair-code {
+      font-size: 28px; font-weight: 700; letter-spacing: 4px; color: #25d366;
+      background: #0f0f13; border: 1px solid #2a2a3a; border-radius: 10px; padding: 12px; margin-bottom: 10px;
+    }
+    .pair-instructions { font-size: 11.5px; color: #6b7c91; line-height: 1.5; }
+
+    #toast-container { position: fixed; bottom: 20px; right: 20px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; }
   </style>
 </head>
 <body>
@@ -302,14 +421,303 @@ async function panelLogout() {
   location.reload();
 }
 </script>
+
 <script>
-  // Load app.js only after we know which backend URL actually works —
-  // avoids app.js's socket.io connection using a stale/wrong default.
-  window.BACKEND_READY.then(() => {
-    const s = document.createElement('script');
-    s.src = '/app.js';
-    document.body.appendChild(s);
+// ══════════════════════════════════════════════════════════════════════════
+// SESSIONS DASHBOARD — talks to panel/server.js's REST + socket.io API.
+// Isse pehle yeh poora hissa panel.html mein tha hi nahi (sirf HTML tha, koi
+// JS nahi) — isi liye login ke baad "0 connected / No Sessions Yet" dikhta
+// tha chahe bots connected hon. Ab yeh asli data fetch/render karta hai.
+// ══════════════════════════════════════════════════════════════════════════
+function toast(msg, type = 'info') {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  document.getElementById('toast-container').appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+function closeModal(id) {
+  document.getElementById(id).classList.remove('open');
+}
+function openModal(id) {
+  document.getElementById(id).classList.add('open');
+}
+
+(function initDashboard() {
+  let sessions = [];
+  let currentQrId = null;
+  let qrRefreshTimer = null;
+  let uptimeBase = null;
+  let socket = null;
+
+  const grid          = document.getElementById('sessions-grid');
+  const emptyState     = document.getElementById('empty-state');
+  const connectedCount = document.getElementById('connected-count');
+  const totalCount     = document.getElementById('total-count');
+  const uptimeEl        = document.getElementById('uptime');
+
+  const STATUS_LABEL = {
+    idle: 'Idle', connecting: 'Connecting…', qr_ready: 'Scan QR',
+    pairing: 'Pairing…', connected: 'Connected', disconnected: 'Disconnected', error: 'Error',
+  };
+
+  function fmtUptime(sec) {
+    sec = Math.floor(sec);
+    const d = Math.floor(sec / 86400); sec %= 86400;
+    const h = Math.floor(sec / 3600);  sec %= 3600;
+    const m = Math.floor(sec / 60);    sec %= 60;
+    if (d > 0) return `${d}d ${h}h`;
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${sec}s`;
+    return `${sec}s`;
+  }
+
+  function renderStats() {
+    const connected = sessions.filter(s => s.status === 'connected').length;
+    connectedCount.textContent = connected;
+    totalCount.textContent = sessions.length;
+  }
+
+  function renderSessions() {
+    const cards = sessions.map(renderCard).join('');
+    grid.innerHTML = cards + emptyState.outerHTML;
+    grid.querySelector('#empty-state').style.display = sessions.length ? 'none' : '';
+    renderStats();
+  }
+
+  function renderCard(s) {
+    const st = s.status || 'idle';
+    const label = STATUS_LABEL[st] || st;
+    const number = s.connectedNumber || s.ownerNumber || '—';
+    const created = s.createdAt ? new Date(s.createdAt).toLocaleDateString() : '—';
+    const canStart = (st === 'idle' || st === 'disconnected' || st === 'error');
+    const canStop  = !canStart;
+    return `
+      <div class="session-card st-${st}" data-id="${s.id}">
+        <div class="session-card-head">
+          <div>
+            <p class="session-name">${escapeHtml(s.name || ('Session ' + s.id))}</p>
+            <div class="session-meta">📱 ${escapeHtml(number)}<br/>🗓 ${created}</div>
+          </div>
+          <span class="session-status st-${st}">${label}</span>
+        </div>
+        <div class="session-actions">
+          ${canStart ? `<button class="btn btn-outline btn-sm" onclick="sessionStart(${s.id})">▶ Start</button>` : ''}
+          ${canStop  ? `<button class="btn btn-outline btn-sm" onclick="sessionStop(${s.id})">⏸ Stop</button>` : ''}
+          ${st !== 'connected' ? `<button class="btn btn-primary btn-sm" onclick="openConnectModal(${s.id})">📲 Connect</button>` : ''}
+          <button class="btn btn-ghost btn-sm" onclick="sessionDelete(${s.id}, '${escapeHtml(s.name || '').replace(/'/g, "\\'")}')">🗑 Delete</button>
+        </div>
+      </div>`;
+  }
+
+  function escapeHtml(str) {
+    return String(str).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  async function api(path, opts = {}) {
+    const r = await fetch(window.BACKEND_URL + path, {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', 'Bypass-Tunnel-Reminder': 'true' },
+      ...opts,
+    });
+    let d = {};
+    try { d = await r.json(); } catch (_) {}
+    if (!r.ok && !d.success === false) { /* some routes 200 without success flag */ }
+    if (r.status === 401) { location.reload(); throw new Error('Session expired'); }
+    return d;
+  }
+
+  async function fetchSessions() {
+    try {
+      const d = await api('/api/sessions');
+      sessions = d.sessions || [];
+      renderSessions();
+    } catch (e) {
+      console.error('[Panel] fetchSessions failed:', e.message);
+    }
+  }
+
+  async function fetchUptime() {
+    try {
+      const d = await api('/api/status');
+      if (typeof d.uptime === 'number') {
+        uptimeBase = Date.now() - d.uptime * 1000;
+        uptimeEl.textContent = fmtUptime(d.uptime);
+      }
+    } catch (_) {}
+  }
+  setInterval(() => { if (uptimeBase) uptimeEl.textContent = fmtUptime((Date.now() - uptimeBase) / 1000); }, 1000);
+
+  // ── Session actions (exposed globally for inline onclick) ──────────────────
+  window.sessionStart = async (id) => {
+    try { await api(`/api/sessions/${id}/start`, { method: 'POST' }); toast('▶ Session start ho raha hai…', 'info'); fetchSessions(); }
+    catch (e) { toast('❌ ' + e.message, 'error'); }
+  };
+  window.sessionStop = async (id) => {
+    try { await api(`/api/sessions/${id}/stop`, { method: 'POST' }); toast('⏸ Session stop ho gaya.', 'info'); fetchSessions(); }
+    catch (e) { toast('❌ ' + e.message, 'error'); }
+  };
+  window.sessionDelete = async (id, name) => {
+    if (!confirm(`"${name || id}" session delete karna hai? Yeh wapas nahi aayega.`)) return;
+    try { await api(`/api/sessions/${id}`, { method: 'DELETE' }); toast('🗑 Session delete ho gaya.', 'info'); fetchSessions(); }
+    catch (e) { toast('❌ ' + e.message, 'error'); }
+  };
+
+  // ── Add Session modal ───────────────────────────────────────────────────────
+  document.getElementById('btn-add-session').addEventListener('click', () => {
+    document.getElementById('input-session-name').value = '';
+    document.getElementById('input-owner-number').value = '';
+    openModal('modal-add');
   });
+
+  document.getElementById('btn-create-session').addEventListener('click', async () => {
+    const name = document.getElementById('input-session-name').value.trim();
+    const ownerNumber = document.getElementById('input-owner-number').value.trim().replace(/[^0-9]/g, '');
+    if (!name) return toast('❌ Session ka naam likho.', 'error');
+    const btn = document.getElementById('btn-create-session');
+    btn.disabled = true; btn.textContent = 'Creating…';
+    try {
+      const d = await api('/api/sessions', { method: 'POST', body: JSON.stringify({ name, ownerNumber }) });
+      if (!d.success) throw new Error(d.error || 'Failed to create session');
+      toast('✅ Session ban gaya!', 'success');
+      closeModal('modal-add');
+      await fetchSessions();
+      if (d.session && d.session.id != null) openConnectModal(d.session.id);
+    } catch (e) {
+      toast('❌ ' + e.message, 'error');
+    } finally {
+      btn.disabled = false; btn.textContent = 'Create Session';
+    }
+  });
+
+  // ── Connect modal (QR / pairing code) ───────────────────────────────────────
+  window.openConnectModal = (id) => {
+    currentQrId = id;
+    switchTab('qr');
+    openModal('modal-qr');
+    refreshQR();
+  };
+
+  window.switchTab = (tab) => {
+    document.getElementById('tab-qr').classList.toggle('active', tab === 'qr');
+    document.getElementById('tab-pair').classList.toggle('active', tab === 'pair');
+    document.getElementById('panel-qr').classList.toggle('active', tab === 'qr');
+    document.getElementById('panel-pair').classList.toggle('active', tab === 'pair');
+  };
+
+  window.refreshQR = async () => {
+    if (currentQrId == null) return;
+    const img = document.getElementById('qr-image');
+    const loading = document.getElementById('qr-loading');
+    const expired = document.getElementById('qr-expired');
+    img.style.display = 'none';
+    expired.style.display = 'none';
+    loading.style.display = 'flex';
+    try {
+      const d = await api(`/api/sessions/${currentQrId}/qr`);
+      if (d.qr) {
+        img.src = d.qr;
+        img.style.display = 'block';
+        loading.style.display = 'none';
+      } else if (d.status === 'connected') {
+        loading.style.display = 'none';
+        toast('✅ WhatsApp connect ho gaya!', 'success');
+        closeModal('modal-qr');
+        fetchSessions();
+      } else {
+        // not ready yet — try again shortly
+        setTimeout(() => { if (currentQrId != null) refreshQR(); }, 2000);
+      }
+    } catch (e) {
+      loading.style.display = 'none';
+      expired.style.display = 'block';
+    }
+  };
+
+  clearInterval(qrRefreshTimer);
+  qrRefreshTimer = setInterval(() => {
+    const modal = document.getElementById('modal-qr');
+    if (modal.classList.contains('open') && document.getElementById('tab-qr').classList.contains('active')) refreshQR();
+  }, 30000);
+
+  window.getPairCode = async () => {
+    if (currentQrId == null) return;
+    const phone = document.getElementById('pair-phone').value.trim().replace(/[^0-9]/g, '');
+    if (!phone) return toast('❌ Number likho.', 'error');
+    const btn = document.getElementById('btn-get-paircode');
+    btn.disabled = true; btn.textContent = 'Requesting…';
+    try {
+      const d = await api(`/api/sessions/${currentQrId}/paircode`, { method: 'POST', body: JSON.stringify({ phone }) });
+      if (!d.success) throw new Error(d.error || 'Failed to get pairing code');
+      document.getElementById('pair-code-text').textContent = d.code;
+      document.getElementById('pair-code-result').style.display = 'block';
+    } catch (e) {
+      toast('❌ ' + e.message, 'error');
+    } finally {
+      btn.disabled = false; btn.textContent = 'Get Pairing Code';
+    }
+  };
+
+  // Reset QR state when the connect modal closes
+  document.querySelectorAll('#modal-qr .modal-close, #modal-qr .modal-footer .btn-ghost').forEach((el) => {
+    el.addEventListener('click', () => { currentQrId = null; });
+  });
+  document.getElementById('modal-qr').querySelector('.modal-close').addEventListener('click', () => {
+    currentQrId = null;
+    document.getElementById('pair-code-result').style.display = 'none';
+    document.getElementById('pair-phone').value = '';
+  });
+
+  // ── Live updates via socket.io ──────────────────────────────────────────────
+  function initSocket() {
+    try {
+      socket = io(window.BACKEND_URL || undefined, { withCredentials: true, transports: ['websocket', 'polling'] });
+      socket.on('sessions:list', (d) => { sessions = d.sessions || []; renderSessions(); });
+      socket.on('sessions:refresh', (d) => { sessions = d.sessions || []; renderSessions(); });
+      socket.on('session:status', () => fetchSessions());
+      socket.on('session:qr', (d) => {
+        if (currentQrId != null && d.id === currentQrId && document.getElementById('tab-qr').classList.contains('active')) {
+          const img = document.getElementById('qr-image');
+          const loading = document.getElementById('qr-loading');
+          if (d.qr) { img.src = d.qr; img.style.display = 'block'; loading.style.display = 'none'; }
+        }
+      });
+      socket.on('session:connected', (d) => {
+        toast(`✅ Session "${d.name || d.id}" WhatsApp se connect ho gaya!`, 'success');
+        if (currentQrId != null && d.id === currentQrId) closeModal('modal-qr');
+        fetchSessions();
+      });
+      socket.on('session:disconnected', () => fetchSessions());
+      socket.on('session:error', (d) => { if (d.error) toast('❌ ' + d.error, 'error'); });
+    } catch (e) {
+      console.error('[Panel] socket.io init failed:', e.message);
+    }
+  }
+
+  // ── Boot: once the lock screen lets the user in, load real data ────────────
+  const mainApp = document.getElementById('main-app');
+  const bootObserver = new MutationObserver(() => {
+    if (mainApp.style.display !== 'none') {
+      bootObserver.disconnect();
+      fetchSessions();
+      fetchUptime();
+      initSocket();
+      setInterval(fetchUptime, 60000);
+    }
+  });
+  bootObserver.observe(mainApp, { attributes: true, attributeFilter: ['style'] });
+  // Also handle the case where the panel is already authenticated on load
+  if (mainApp.style.display !== 'none') { fetchSessions(); fetchUptime(); initSocket(); }
+})();
+</script>
+<script>
+  // NOTE: this used to lazy-load /app.js here, but app.js is the public
+  // MARKETING WEBSITE's script (renders the #cmd-grid commands list, the
+  // #theme-toggle button, etc. — none of which exist on this admin panel
+  // page). Loading it here just threw console errors (null.innerHTML on
+  // #cmd-grid) and served no purpose — everything the panel dashboard
+  // actually needs is now defined directly above in this file.
 </script>
 <script>
   // Wire up "Add First Session" button in empty state
