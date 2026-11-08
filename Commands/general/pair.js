@@ -190,7 +190,7 @@ const PAIR_WAIT_MS = 3 * 60 * 1000;
 async function directPair(sock, msg, phone, extra) {
   const reply = (t) => sock.sendMessage(extra.from, { text: t }, { quoted: msg });
   let sm, ST;
-  try { sm = require('../../Panel/sessionManager'); ST = sm.SESSION_STATUS; }
+  try { sm = require('../../panel/sessionManager'); ST = sm.SESSION_STATUS; }
   catch (e) { return reply('❌ Is server par direct connect available nahi hai. Website se connect karo.'); }
 
   const sender = extra.sender || extra.from;
