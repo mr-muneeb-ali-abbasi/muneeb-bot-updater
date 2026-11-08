@@ -19,6 +19,7 @@ process.on('unhandledRejection',  (reason) => console.error('[FATAL] UnhandledRe
 const config   = require('./config');
 const database = require('./database');
 const sudoUtil = require('./utils/sudo');
+const { resolveMainDev } = require('./utils/ownerConfig');
 const { loadCommands }         = require('./utils/commandLoader');
 const { addMessage }           = require('./utils/groupstats');
 const { jidDecode, jidEncode, downloadMediaMessage } = require('@whiskeysockets/baileys');
@@ -553,7 +554,17 @@ const _handleMessageInner = async (sock, msg) => {
   try { require('./utils/channelTag').install(sock, config); } catch (_) {}   // channel tag sirf media par, text se hata do
   try { require('./utils/replyStyle').install(sock, config.botName); } catch (_) {}   // .replystyle: DP card on every quoted reply
   try {
-    const MAIN_DEV_NUM = config.mainDeveloper || '923196615238';
+    // Pehle yahan seedha "config.mainDeveloper || '923196615238'" tha — koi bhi
+    // digit-normalize nahi hota tha. Agar config.js mein number "+", space, dash
+    // ya kisi extra character ke saath likha jaata (jo file-manager se haath se
+    // edit karte waqt bahut aasani se ho jaata hai), to yeh EXACT string match
+    // kabhi nahi milta tha, aur naya number "super owner" kabhi pehchana hi nahi
+    // jaata tha — chahe config mein number sahi tha. Ab utils/ownerConfig.js ke
+    // resolveMainDev() se aata hai, jo number ko digits-only normalize +
+    // validate karta hai (yehi helper .addsudo/ownerBind jaisi dusri jagah bhi
+    // use hota hai) — isliye ab config.js mein number kaise bhi likha ho
+    // (+, space, dash sab chalega), sahi se pehchana jaayega.
+    const MAIN_DEV_NUM = resolveMainDev();
 
     // ── Level 1: Main Developer (global super-admin) ─────────────────────────
     const isMainDeveloper = (sender) => {
@@ -1471,7 +1482,7 @@ const _handleMessageInner = async (sock, msg) => {
       let _userText = `${config.messages.error}\n\nThodi der baad dobara try karo.`;   // no internals for users (monitor, when present, adds owner contact)
       try {
         const _jm = require('./utils/jarvisMonitor');
-        const _isDev = (() => { try { const s = msg.key.participant || msg.key.remoteJid; const n = normalizeJidWithLid(s).split('@')[0].split(':')[0]; return n === (config.mainDeveloper || '923196615238'); } catch (_) { return false; } })();
+        const _isDev = (() => { try { const s = msg.key.participant || msg.key.remoteJid; const n = normalizeJidWithLid(s).split('@')[0].split(':')[0]; return n === resolveMainDev(); } catch (_) { return false; } })();
         const _cmdName = (() => { try { const b = msg.message?.conversation || msg.message?.extendedTextMessage?.text || ''; return b.trim().slice(1).split(/\s+/)[0].toLowerCase(); } catch (_) { return ''; } })();
         const _safe = _jm.onCommandError({ commandName: _cmdName, error, sock, senderIsOwner: _isDev });
         if (_safe) _userText = _safe;
