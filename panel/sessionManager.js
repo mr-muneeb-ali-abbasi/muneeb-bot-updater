@@ -28,6 +28,14 @@ const SESSIONS_DIR = path.join(__dirname, '..', 'sessions');
 // ho gaya aur creds clear ho gaye), usko itni der "unconnected" rehne par khud delete kar do.
 const AUTO_DELETE_UNPAIRED_MS = 5 * 60 * 1000; // 5 minute
 
+// Jo session PEHLE connect ho chuka tha (valid creds hain) lekin ab disconnect/error/idle
+// hai aur baar baar reconnect try karne ke bawajood wapas connect nahi ho pa raha — itni
+// der ke baad usko "real mein disconnect/dead" maan kar session hi delete kar do, taaki
+// slot hamesha ke liye block na rahe. (Reconnect ko poora mauka milta hai pehle — 90s ke
+// baad pehli koshish, phir har watchdog tick (60s) par — isliye yeh sirf GENUINE dead
+// session par lagta hai, ek normal chhoti si network-blip par nahi.)
+const AUTO_DELETE_DEAD_RECONNECT_MS = 10 * 60 * 1000; // 10 minute
+
 // ── Cached Baileys version (fetch once, reuse for all sessions) ─────────────
 let _cachedVersion = null;
 let _versionFetchPromise = null;
@@ -354,6 +362,7 @@ class SessionManager extends EventEmitter {
           session.qrImage = null;
           session.restartCount = 0;
           session._downSince = null;
+          session._firstDownSince = null;
           session._unconnectedSince = null;
           session._connectingSince = null;
 
@@ -506,6 +515,7 @@ class SessionManager extends EventEmitter {
           session.qrImage = null;
           session.restartCount = 0;
           session._downSince = null;
+          session._firstDownSince = null;
           session._unconnectedSince = null;
           session._connectingSince = null;
 
@@ -695,6 +705,24 @@ sock.ev.on('group-participants.update', async (update) => {
           // second-line recovery only)
           if ([SESSION_STATUS.DISCONNECTED, SESSION_STATUS.ERROR, SESSION_STATUS.IDLE].includes(status)) {
             session._downSince = session._downSince || now;
+            // Unlike _downSince (which resets after each reconnect trigger below, so it
+            // can fire again every 90s), _firstDownSince tracks continuously since the
+            // session FIRST went down — only cleared once it actually reconnects (see
+            // the two "connection === 'open'" handlers above). This is what decides if
+            // the session is genuinely dead.
+            session._firstDownSince = session._firstDownSince || now;
+
+            // Genuinely dead — reconnect attempts have had AUTO_DELETE_DEAD_RECONNECT_MS
+            // worth of chances (a fresh retry every ~90s the whole time) and it's still
+            // not back → free the slot instead of retrying forever.
+            if (now - session._firstDownSince > AUTO_DELETE_DEAD_RECONNECT_MS) {
+              console.log(`[Watchdog] Session ${id} (${session.name}) ${AUTO_DELETE_DEAD_RECONNECT_MS / 60000}min se ${status} hai, reconnect nahi ho pa raha → real mein dead maan kar session delete kar raha hoon (slot free)`);
+              this.deleteSession(id).catch(e =>
+                console.error(`[Watchdog] Session ${id} dead-session auto-delete error:`, e.message)
+              );
+              continue;
+            }
+
             if (now - session._downSince > 90 * 1000) {
               console.log(`[Watchdog] Session ${id} has been ${status} >90s → forcing reconnect`);
               session._downSince = null;
@@ -705,6 +733,7 @@ sock.ev.on('group-participants.update', async (update) => {
             continue;
           }
           session._downSince = null;
+          session._firstDownSince = null;
 
           // Case 2: CONNECTED — Baileys manages its own keepalive and will emit
           // 'connection.update' with connection:'close' if the socket dies.
