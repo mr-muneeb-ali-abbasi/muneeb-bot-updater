@@ -9,11 +9,17 @@
 const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
 const viewOnceStore = require('../../utils/viewOnceStore');
 
-const NOT_SAVED_TEXT =
-  '⚠️ Ye view-once reveal nahi ho paya.\n\n' +
-  'WhatsApp reply me view-once ka media nahi deta, aur bot ne ye message aate waqt save nahi kiya ' +
-  '(message bot ke online hone se pehle ka hai, ya 1 ghante se purana hai, ya bahut bada tha).\n\n' +
-  '👉 Naye view-once par turant reply karke .vv likho.';
+function reasonText(id, quotedInfo) {
+  const st = viewOnceStore.status(id);
+  let why;
+  if (!st) why = 'Ye message bot tak pahuncha hi nahi.';
+  else if (st.state === 'SEEN_NOT_VO') why = 'Ye view-once nahi hai, normal media hai.';
+  else if (st.state === 'NOMEDIA') why = 'WhatsApp ne media link diya hi nahi (WhatsApp ki restriction).';
+  else if (st.state === 'DLFAIL') why = 'Download fail ho gaya, link expire ho sakta hai.';
+  else if (st.state === 'TOOBIG') why = 'Media bahut bada hai.';
+  else why = 'Abhi save ho raha hai, thodi der baad .vv dobara karo.';
+  return '⚠️ View-once reveal nahi hua — ' + why;
+}
 
 async function sendRevealed(sock, chatId, msg, { type, buffer, caption, mimetype, ptt }) {
   if (type === 'video') {
@@ -62,7 +68,7 @@ module.exports = {
         return await sock.sendMessage(chatId, { text: '❌ This is not a view-once message!' }, { quoted: msg });
       }
       if (!u.media.url && !u.media.directPath) {
-        return await sock.sendMessage(chatId, { text: NOT_SAVED_TEXT }, { quoted: msg });
+        return await sock.sendMessage(chatId, { text: reasonText(ctx.stanzaId, Object.keys(q).join(',')) }, { quoted: msg });
       }
 
       const stream = await downloadContentFromMessage(u.media, u.type);
@@ -75,8 +81,9 @@ module.exports = {
     } catch (error) {
       console.error('Error in viewonce command:', error);
       const m = String(error?.message || '');
+      const ctx2 = msg.message?.extendedTextMessage?.contextInfo || {};
       const text = /directPath|media URL|404|410|expired|decrypt/i.test(m)
-        ? NOT_SAVED_TEXT
+        ? reasonText(ctx2.stanzaId, '')
         : '❌ Error processing view-once message: ' + (m || 'Unknown error');
       await sock.sendMessage(chatId, { text }, { quoted: msg });
     }
