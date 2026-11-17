@@ -636,10 +636,20 @@ const _handleMessageInner = async (sock, msg) => {
                 const audioBuffer = await downloadMediaMessage(msg, 'buffer', {});
                 try { await sock.sendPresenceUpdate('recording', from); } catch (_) {}
                 const stt = require('./utils/sttEngine');
-                const transcript = await stt.transcribeAudio(audioBuffer, { language: config.voiceLanguage || 'hi' });
+                // 'auto' = jo bhi zaban bol raha hai usi mein sahi se sune (pehle forced
+                // Hindi tha, isliye kisi aur zaban mein bolne par galat sunta tha).
+                let transcript = await stt.transcribeAudio(audioBuffer, { language: 'auto' });
+                const looksCJK = (t) => /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(t || '');
+                // chhote clips mein 'auto' kabhi-kabhi Chinese/Japanese/Korean samajh leta
+                // hai jab asal mein Hindi/Urdu bola gaya ho \u2014 ek safety retry forced-Hindi se.
+                if (transcript && looksCJK(transcript) && transcript.length < 12) {
+                  try {
+                    const retry = await stt.transcribeAudio(audioBuffer, { language: config.voiceLanguage || 'hi' });
+                    if (retry && !looksCJK(retry)) transcript = retry;
+                  } catch (_) {}
+                }
                 console.log(`[VoiceBot] Heard: "${(transcript || '').slice(0, 80)}"`);
-                // CJK / Hangul in the transcript means the language was misdetected
-                if (!transcript || /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(transcript)) {
+                if (!transcript) {
                   await _speakOrText('भाई, मुझे आपकी आवाज़ ठीक से समझ नहीं आई, ज़रा दोबारा बोलना।', '🎙️ Samajh nahi aaya, dobara bolein.');
                   return;
                 }
@@ -670,8 +680,9 @@ const _handleMessageInner = async (sock, msg) => {
                 }
 
                 const tts = require('./utils/ttsEngine');
+                const forcedVoices = out.voiceLang ? tts.voicesForLang(out.voiceLang) : null;
                 let voiceBuf = null;
-                try { voiceBuf = await tts.textToVoiceNote(out.text); }
+                try { voiceBuf = await tts.textToVoiceNote(out.text, forcedVoices ? { voices: forcedVoices } : {}); }
                 catch (te) { console.error('[VoiceBot] TTS failed (male voice unavailable):', te.message); }
                 if (voiceBuf) {
                   await sock.sendMessage(from, { audio: voiceBuf, mimetype: 'audio/ogg; codecs=opus', ptt: true }, { quoted: msg });
@@ -888,6 +899,8 @@ const _handleMessageInner = async (sock, msg) => {
       ? sock.user.id.split(':')[0] + '@s.whatsapp.net'
       : incomingSender;
     const isGroup = from.endsWith('@g.us');
+    // view-once media message aate hi save (utils/viewOnceStore.js) — .vv isi se reveal karta hai
+    try { require('./utils/viewOnceStore').capture(sock, msg); } catch (_) {}
 
     // ── Anti-fake: a new member stays MUTED until an admin verifies with .ok ──
     // Only a voice note is allowed through (admins need to hear it); everything else
