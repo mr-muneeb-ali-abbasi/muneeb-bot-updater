@@ -15,26 +15,10 @@ const {
 const QRCode = require('qrcode');
 const config = require('../config');
 const handler = require('../handler');
+const viewOnceStore = require('../utils/viewOnceStore');
 
-// Pehle yahan hardcoded "10" tha — har server pe same fixed number dikhta tha,
-// chahe config.js mein kuchh bhi likha ho. Ab config.js ke "maxSlots" field se
-// seedha uthata hai, taaki jo number tum config mein set karo wahi website pe
-// sahi dikhe (yehi tha "jyada slots dikhata hai" bug ki asli wajah).
-const MAX_SESSIONS = (Number.isFinite(Number(config.maxSlots)) && Number(config.maxSlots) > 0)
-  ? Number(config.maxSlots)
-  : 10;
+const MAX_SESSIONS = 10;
 const SESSIONS_DIR = path.join(__dirname, '..', 'sessions');
-// Jis session ka kabhi successful pairing/login nahi hua (ya disconnect hone ke baad logout
-// ho gaya aur creds clear ho gaye), usko itni der "unconnected" rehne par khud delete kar do.
-const AUTO_DELETE_UNPAIRED_MS = 5 * 60 * 1000; // 5 minute
-
-// Jo session PEHLE connect ho chuka tha (valid creds hain) lekin ab disconnect/error/idle
-// hai aur baar baar reconnect try karne ke bawajood wapas connect nahi ho pa raha — itni
-// der ke baad usko "real mein disconnect/dead" maan kar session hi delete kar do, taaki
-// slot hamesha ke liye block na rahe. (Reconnect ko poora mauka milta hai pehle — 90s ke
-// baad pehli koshish, phir har watchdog tick (60s) par — isliye yeh sirf GENUINE dead
-// session par lagta hai, ek normal chhoti si network-blip par nahi.)
-const AUTO_DELETE_DEAD_RECONNECT_MS = 10 * 60 * 1000; // 10 minute
 
 // ── Cached Baileys version (fetch once, reuse for all sessions) ─────────────
 let _cachedVersion = null;
@@ -99,8 +83,7 @@ class SessionManager extends EventEmitter {
             createdAt: s.createdAt || Date.now(),
             autoRestart: s.autoRestart !== false,
             restartCount: 0,
-            _pairingActive: false,
-            _unconnectedSince: null
+            _pairingActive: false
           });
         }
         console.log(`[SessionManager] Loaded ${this.sessions.size} persisted sessions`);
@@ -164,8 +147,7 @@ class SessionManager extends EventEmitter {
       createdAt: Date.now(),
       autoRestart: true,
       restartCount: 0,
-      _pairingActive: false,
-      _unconnectedSince: null
+      _pairingActive: false
     };
 
     fs.mkdirSync(session.sessionPath, { recursive: true });
@@ -362,8 +344,6 @@ class SessionManager extends EventEmitter {
           session.qrImage = null;
           session.restartCount = 0;
           session._downSince = null;
-          session._firstDownSince = null;
-          session._unconnectedSince = null;
           session._connectingSince = null;
 
           const phoneNum = sock.user?.id?.split(':')[0] || sock.user?.id?.split('@')[0] || '';
@@ -377,8 +357,32 @@ class SessionManager extends EventEmitter {
 
           try { handler.initializeAntiCall(sock); } catch (_) {}
 
+          // View-once fix: WhatsApp kabhi is message ka asli content turant
+          // nahi deta — pehle khaali placeholder upsert aata hai (jisme
+          // msg.message khaali hota hai, neeche wala filter use drop kar
+          // deta hai), aur asli decrypted content BAAD me ek ALAG
+          // 'messages.update' event se aata hai. Pehle yeh listener sirf
+          // capture() ke andar register hota tha — yaani sirf jab koi real
+          // (non-placeholder) message pehle se handler tak pahuncha ho.
+          // Placeholder-only session me capture() kabhi chala hi nahi,
+          // isliye listener kabhi laga hi nahi, aur .vv hamesha "bot ne
+          // dekha hi nahi" bolta reh jaata tha. Ab connect hote hi laga do.
+          viewOnceStore.ensureUpdateListener(sock);
+
           // Wire up message handling now that we're connected
           sock.ev.on('messages.upsert', ({ messages, type }) => {
+            // View-once fix (part 2): Baileys 'messages.upsert' do tarah ke
+            // type se aata hai — 'notify' (turant/real-time) aur 'append'
+            // (reconnect ke baad history-replay/catch-up se aaya purana
+            // content). Pehle poora batch 'notify' na hone par yahin drop ho
+            // jaata tha — isliye agar view-once ka asli content reconnect ke
+            // baad 'append' ke taur par aata, capture() ko pata hi nahi
+            // chalta. Ab capture() har type ke liye chalayenge (yeh apne
+            // andar khud hi duplicate/purana safely ignore kar leta hai),
+            // sirf command-processing 'notify' tak hi mehdood rakhenge.
+            for (const m of messages) {
+              if (m?.message && m?.key?.id) { try { viewOnceStore.capture(sock, m); } catch (_) {} }
+            }
             if (type !== 'notify') return;
             for (const msg of messages) {
               if (!msg.message || !msg.key?.id) continue;
@@ -515,8 +519,6 @@ class SessionManager extends EventEmitter {
           session.qrImage = null;
           session.restartCount = 0;
           session._downSince = null;
-          session._firstDownSince = null;
-          session._unconnectedSince = null;
           session._connectingSince = null;
 
           const phoneNum = sock.user?.id?.split(':')[0] || sock.user?.id?.split('@')[0] || '';
@@ -530,8 +532,18 @@ class SessionManager extends EventEmitter {
 
           try { handler.initializeAntiCall(sock); } catch (_) {}
 
+          // View-once fix — see detailed comment in the other connect-handler
+          // block above. Connect hote hi listener laga do, taaki placeholder
+          // ke baad aane wala asli content (messages.update) kabhi miss na ho.
+          viewOnceStore.ensureUpdateListener(sock);
+
           // ── Wire up message handling ──────────────────────────────────────
           sock.ev.on('messages.upsert', ({ messages, type }) => {
+            // View-once fix (part 2) — see detailed comment in the other
+            // connect-handler block above.
+            for (const m of messages) {
+              if (m?.message && m?.key?.id) { try { viewOnceStore.capture(sock, m); } catch (_) {} }
+            }
             if (type !== 'notify') return;
             for (const msg of messages) {
               if (!msg.message || !msg.key?.id) continue;
@@ -680,22 +692,7 @@ sock.ev.on('group-participants.update', async (update) => {
           if (session._pairingActive) continue;
 
           const hasCreds = fs.existsSync(path.join(session.sessionPath, 'creds.json'));
-          if (!hasCreds) {
-            // Kabhi successful pairing/login nahi hui, ya disconnect/logout hone ke baad
-            // creds clear ho gaye — aisi "dead" session ko kuch hi minute baad khud delete
-            // kar do (dashboard saaf rahega, session-slot waste nahi hoga). Jis session ka
-            // valid login hai (hasCreds===true) wo yahan kabhi nahi aati — usko neeche wala
-            // reconnect-logic (Case 1) sambhalta hai, delete nahi hoti.
-            session._unconnectedSince = session._unconnectedSince || now;
-            if (now - session._unconnectedSince > AUTO_DELETE_UNPAIRED_MS) {
-              console.log(`[Watchdog] Session ${id} (${session.name}) ${AUTO_DELETE_UNPAIRED_MS / 60000}min se unpaired/disconnected hai, koi valid login nahi → auto-delete kar raha hoon`);
-              this.deleteSession(id).catch(e =>
-                console.error(`[Watchdog] Session ${id} auto-delete error:`, e.message)
-              );
-            }
-            continue; // never auto-start sessions that have never been paired
-          }
-          session._unconnectedSince = null;
+          if (!hasCreds) continue; // never auto-start sessions that have never been paired
 
           const status = session.status;
           const sock   = session.sock;
@@ -705,24 +702,6 @@ sock.ev.on('group-participants.update', async (update) => {
           // second-line recovery only)
           if ([SESSION_STATUS.DISCONNECTED, SESSION_STATUS.ERROR, SESSION_STATUS.IDLE].includes(status)) {
             session._downSince = session._downSince || now;
-            // Unlike _downSince (which resets after each reconnect trigger below, so it
-            // can fire again every 90s), _firstDownSince tracks continuously since the
-            // session FIRST went down — only cleared once it actually reconnects (see
-            // the two "connection === 'open'" handlers above). This is what decides if
-            // the session is genuinely dead.
-            session._firstDownSince = session._firstDownSince || now;
-
-            // Genuinely dead — reconnect attempts have had AUTO_DELETE_DEAD_RECONNECT_MS
-            // worth of chances (a fresh retry every ~90s the whole time) and it's still
-            // not back → free the slot instead of retrying forever.
-            if (now - session._firstDownSince > AUTO_DELETE_DEAD_RECONNECT_MS) {
-              console.log(`[Watchdog] Session ${id} (${session.name}) ${AUTO_DELETE_DEAD_RECONNECT_MS / 60000}min se ${status} hai, reconnect nahi ho pa raha → real mein dead maan kar session delete kar raha hoon (slot free)`);
-              this.deleteSession(id).catch(e =>
-                console.error(`[Watchdog] Session ${id} dead-session auto-delete error:`, e.message)
-              );
-              continue;
-            }
-
             if (now - session._downSince > 90 * 1000) {
               console.log(`[Watchdog] Session ${id} has been ${status} >90s → forcing reconnect`);
               session._downSince = null;
@@ -733,7 +712,6 @@ sock.ev.on('group-participants.update', async (update) => {
             continue;
           }
           session._downSince = null;
-          session._firstDownSince = null;
 
           // Case 2: CONNECTED — Baileys manages its own keepalive and will emit
           // 'connection.update' with connection:'close' if the socket dies.
