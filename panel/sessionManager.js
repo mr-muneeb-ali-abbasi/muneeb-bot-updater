@@ -17,8 +17,17 @@ const config = require('../config');
 const handler = require('../handler');
 const viewOnceStore = require('../utils/viewOnceStore');
 
-const MAX_SESSIONS = 10;
+// Pehle yahan hardcoded "10" tha — har server pe same fixed number dikhta tha,
+// chahe config.js mein kuchh bhi likha ho. Ab config.js ke "maxSlots" field se
+// seedha uthata hai, taaki jo number tum config mein set karo wahi website pe
+// sahi dikhe (yehi tha "jyada slots dikhata hai" bug ki asli wajah).
+const MAX_SESSIONS = (Number.isFinite(Number(config.maxSlots)) && Number(config.maxSlots) > 0)
+  ? Number(config.maxSlots)
+  : 10;
 const SESSIONS_DIR = path.join(__dirname, '..', 'sessions');
+// Jis session ka kabhi successful pairing/login nahi hua (ya disconnect hone ke baad logout
+// ho gaya aur creds clear ho gaye), usko itni der "unconnected" rehne par khud delete kar do.
+const AUTO_DELETE_UNPAIRED_MS = 5 * 60 * 1000; // 5 minute
 
 // ── Cached Baileys version (fetch once, reuse for all sessions) ─────────────
 let _cachedVersion = null;
@@ -83,7 +92,8 @@ class SessionManager extends EventEmitter {
             createdAt: s.createdAt || Date.now(),
             autoRestart: s.autoRestart !== false,
             restartCount: 0,
-            _pairingActive: false
+            _pairingActive: false,
+            _unconnectedSince: null
           });
         }
         console.log(`[SessionManager] Loaded ${this.sessions.size} persisted sessions`);
@@ -147,7 +157,8 @@ class SessionManager extends EventEmitter {
       createdAt: Date.now(),
       autoRestart: true,
       restartCount: 0,
-      _pairingActive: false
+      _pairingActive: false,
+      _unconnectedSince: null
     };
 
     fs.mkdirSync(session.sessionPath, { recursive: true });
@@ -344,6 +355,7 @@ class SessionManager extends EventEmitter {
           session.qrImage = null;
           session.restartCount = 0;
           session._downSince = null;
+          session._unconnectedSince = null;
           session._connectingSince = null;
 
           const phoneNum = sock.user?.id?.split(':')[0] || sock.user?.id?.split('@')[0] || '';
@@ -473,11 +485,31 @@ class SessionManager extends EventEmitter {
 
       const logger = pino({ level: 'silent' });
 
+      // ⚠️ EXPERIMENTAL — view-once "jugaad" TEST (sirf test-server pe!):
+      // Research se pata chala ke WhatsApp ka server view-once ka asli
+      // content un devices ko bhejta hai jo khud ko "view-once capable"
+      // declare karte hain (jaise Android/iPhone app) — "Web"/Desktop jaisi
+      // identity wale linked devices ko content redact/strip karke bheja
+      // jaata hai (isi wajah se humein corrupt/green-block media milta
+      // tha). Yeh neeche wali `browser` tuple sirf ek "display name" string
+      // hai jo Baileys publicly expose karta hai — asal protocol-level
+      // device-trust field (DeviceProps.platformType) iske andar nahi hai,
+      // isliye yeh guarantee NAHI ke sirf isse hi fix ho jaayega — lekin
+      // yeh sabse safe, reversible lever hai jo bina Baileys ke andar
+      // (node_modules) chedhe try ki ja sakti hai. Pairing-code wali
+      // dusri jagah (upar `_connectSessionForPairing`) jaan-bujh kar
+      // Ubuntu/Chrome hi rakhi hai — WhatsApp docs kehte hain pairing ke
+      // liye "valid/logical" desktop-jaisi identity chahiye, warna code
+      // generate hi nahi hota.
+      // TEST KARNE KE BAAD: agar asli view-once content aana shuru ho
+      // jaaye to maan lo yeh kaam kar gaya. Agar abhi bhi green/corrupt
+      // aaye, to iska matlab yeh field server ke faisle ko affect nahi
+      // karta, aur isse neeche wapas 'Ubuntu','Chrome' kar dena.
       const sock = makeWASocket({
         version,
         logger,
         printQRInTerminal: false,
-        browser: ['Ubuntu', 'Chrome', '20.0.04'],
+        browser: ['WhatsApp', 'Android', '2.26.1'],
         auth: state,
         syncFullHistory: false,
         downloadHistory: false,
@@ -519,6 +551,7 @@ class SessionManager extends EventEmitter {
           session.qrImage = null;
           session.restartCount = 0;
           session._downSince = null;
+          session._unconnectedSince = null;
           session._connectingSince = null;
 
           const phoneNum = sock.user?.id?.split(':')[0] || sock.user?.id?.split('@')[0] || '';
@@ -692,7 +725,22 @@ sock.ev.on('group-participants.update', async (update) => {
           if (session._pairingActive) continue;
 
           const hasCreds = fs.existsSync(path.join(session.sessionPath, 'creds.json'));
-          if (!hasCreds) continue; // never auto-start sessions that have never been paired
+          if (!hasCreds) {
+            // Kabhi successful pairing/login nahi hui, ya disconnect/logout hone ke baad
+            // creds clear ho gaye — aisi "dead" session ko kuch hi minute baad khud delete
+            // kar do (dashboard saaf rahega, session-slot waste nahi hoga). Jis session ka
+            // valid login hai (hasCreds===true) wo yahan kabhi nahi aati — usko neeche wala
+            // reconnect-logic (Case 1) sambhalta hai, delete nahi hoti.
+            session._unconnectedSince = session._unconnectedSince || now;
+            if (now - session._unconnectedSince > AUTO_DELETE_UNPAIRED_MS) {
+              console.log(`[Watchdog] Session ${id} (${session.name}) ${AUTO_DELETE_UNPAIRED_MS / 60000}min se unpaired/disconnected hai, koi valid login nahi → auto-delete kar raha hoon`);
+              this.deleteSession(id).catch(e =>
+                console.error(`[Watchdog] Session ${id} auto-delete error:`, e.message)
+              );
+            }
+            continue; // never auto-start sessions that have never been paired
+          }
+          session._unconnectedSince = null;
 
           const status = session.status;
           const sock   = session.sock;
