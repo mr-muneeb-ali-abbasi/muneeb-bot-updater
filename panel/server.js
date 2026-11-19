@@ -541,11 +541,78 @@ function publishServerStatus(url) {
 // mein crash ho jaye).
 setInterval(() => publishServerStatus(currentBackendUrl), 15 * 1000);
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// yt-dlp AUTO-UPDATER — "yt-dlp binary is N days old" warning fix.
+// YouTube har kuch din mein badalta hai, purana yt-dlp fail ho jaata hai. Ye
+// function start ke ~20s baad (phir har 24h) bin/yt-dlp ki umar check karta hai
+// aur 3 din se purani ho to GitHub se latest download karke safely replace
+// kar deta hai (temp file -> rename, taaki beech mein file adhoori na rahe).
+// Koi bhi error aaye to sirf log hota hai, bot kabhi crash nahi hoga.
+// ═══════════════════════════════════════════════════════════════════════════════
+const YTDLP_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000;
+const YTDLP_URL = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp';
+
+function _ytdlpPath() {
+  const fixed = '/home/container/bin';
+  const dir = fs.existsSync(fixed) ? fixed : path.join(__dirname, '..', 'bin');
+  return path.join(dir, 'yt-dlp');
+}
+
+function _downloadFile(url, dest, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirects > 5) return reject(new Error('too many redirects'));
+    const lib = url.startsWith('https') ? require('https') : require('http');
+    const req = lib.get(url, { headers: { 'User-Agent': 'yt-dlp-autoupdate' } }, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        res.resume();
+        return resolve(_downloadFile(new URL(res.headers.location, url).toString(), dest, redirects + 1));
+      }
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error('HTTP ' + res.statusCode)); }
+      const out = fs.createWriteStream(dest);
+      res.pipe(out);
+      out.on('finish', () => out.close(() => resolve()));
+      out.on('error', reject);
+      res.on('error', reject);
+    });
+    req.setTimeout(60000, () => req.destroy(new Error('download timeout')));
+    req.on('error', reject);
+  });
+}
+
+let _ytdlpUpdating = false;
+async function updateYtDlpIfOld() {
+  if (_ytdlpUpdating) return;
+  _ytdlpUpdating = true;
+  const bin = _ytdlpPath();
+  const tmp = bin + '.new';
+  try {
+    let age = Infinity;
+    try { age = Date.now() - fs.statSync(bin).mtimeMs; } catch (_) {}
+    if (age < YTDLP_MAX_AGE_MS) return;           // abhi fresh hai
+    console.log('[ytdlp-update] binary purani/missing hai — latest download kar raha hun...');
+    fs.mkdirSync(path.dirname(bin), { recursive: true });
+    await _downloadFile(YTDLP_URL, tmp);
+    const size = fs.statSync(tmp).size;
+    if (size < 1024 * 1024) throw new Error('downloaded file too small (' + size + ' bytes)');
+    fs.chmodSync(tmp, 0o755);
+    fs.renameSync(tmp, bin);                      // atomic replace
+    console.log('[ytdlp-update] ✅ yt-dlp update ho gaya:', bin);
+  } catch (e) {
+    console.log('[ytdlp-update] ⚠️ update fail:', e.message, '— purani binary hi chalegi, 24h baad dobara try hoga.');
+    try { fs.unlinkSync(tmp); } catch (_) {}
+  } finally {
+    _ytdlpUpdating = false;
+  }
+}
+
 function startPanelServer() {
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n🌐 Panel running at http://0.0.0.0:${PORT}`);
     console.log(`📊 Managing up to ${sessionManager.MAX_SESSIONS} bot sessions\n`);
     sessionManager.autoStartSessions();
+
+    // yt-dlp auto-update (startup ke 20s baad, phir har 24 ghante)
+    setTimeout(() => { updateYtDlpIfOld(); setInterval(updateYtDlpIfOld, 24 * 60 * 60 * 1000); }, 20 * 1000);
 
     // ── Free HTTPS tunnel — Cloudflare Tunnel ──────────────────────────────────
     // Pehle yahan Cloudflare + localtunnel dono the (localtunnel ek fallback
@@ -558,49 +625,73 @@ function startPanelServer() {
     // seedha Gist mein publish ho jaata hai (koi fixed-subdomain collision
     // nahi ho sakta).
     (async () => {
+      let cf;
       try {
-        const { Tunnel } = require('cloudflared');
-        let cfTunnel = null;
-
-        const connectCloudflare = async () => {
-          try {
-            cfTunnel = Tunnel.quick(`http://localhost:${PORT}`);
-
-            const urlPromise = new Promise((resolve, reject) => {
-              const timer = setTimeout(() => reject(new Error('timeout waiting for URL')), 30000);
-              cfTunnel.once('url', (u) => { clearTimeout(timer); resolve(u); });
-            });
-
-            const url = await urlPromise;
-            currentBackendUrl = url;
-            publishServerStatus(url);
-            console.log(`\n🔒 Public HTTPS URL (Cloudflare): ${url}\n`);
-            console.log(`ℹ️  Frontend will auto-discover this via the Gist — no manual update needed.`);
-
-            cfTunnel.on('exit', (code) => {
-              console.log(`[Cloudflare Tunnel] process exited (code ${code}) — reconnecting in 5s...`);
-              // Cloudflare's free "quick tunnel" can die on its own every so often —
-              // that's normal, not a bug. The bug was that the OLD dead URL kept
-              // getting republished as "fresh"/online for up to 30s after it
-              // actually stopped working, because nothing told the Gist it had
-              // died until the NEXT successful reconnect. Now the moment it dies,
-              // we immediately mark this server as unreachable (empty url) so the
-              // website shows an honest "Offline" right away instead of a stale
-              // "Online" that silently fails when someone tries to connect.
-              currentBackendUrl = null;
-              publishServerStatus(null);
-              setTimeout(connectCloudflare, 5000);
-            });
-          } catch (e) {
-            console.log('[Cloudflare Tunnel] failed to start:', e.message, '— retrying in 5s...');
-            setTimeout(connectCloudflare, 5000);
-          }
-        };
-
-        await connectCloudflare();
+        cf = require('cloudflared');
       } catch (e) {
         console.log('[Cloudflare Tunnel] package not available:', e.message, '— bot will run without a public URL until this is fixed.');
+        return;
       }
+      const fs = require('fs');
+      const pathMod = require('path');
+      const { Tunnel } = cf;
+      let cfTunnel = null;
+      let retryTimer = null;
+
+      // FIX (ENOENT): "spawn .../cloudflared ENOENT" ka matlab hai cloudflared ki
+      // binary file disk par hai hi nahi — npm package sirf wrapper hai, asli
+      // binary postinstall mein download hoti hai, jo panel ke auto-install mein
+      // skip/fail ho jaati hai. Ab server khud start par check karta hai aur
+      // binary missing ho to khud download kar leta hai.
+      const ensureBinary = async () => {
+        if (fs.existsSync(cf.bin)) return;
+        console.log('[Cloudflare Tunnel] binary missing — downloading now (ek baar, ~30MB)...');
+        fs.mkdirSync(pathMod.dirname(cf.bin), { recursive: true });
+        await cf.install(cf.bin);
+        try { fs.chmodSync(cf.bin, 0o755); } catch (_) {}
+        console.log('[Cloudflare Tunnel] ✅ binary installed:', cf.bin);
+      };
+
+      // Sirf ek retry timer ek waqt par (exit + error dono fire hon to double loop na bane)
+      const scheduleRetry = (ms) => {
+        if (retryTimer) return;
+        retryTimer = setTimeout(() => { retryTimer = null; connectCloudflare(); }, ms);
+      };
+
+      const connectCloudflare = async () => {
+        try {
+          await ensureBinary();
+          const t = Tunnel.quick(`http://localhost:${PORT}`);
+          cfTunnel = t;
+
+          const url = await new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error('timeout waiting for URL')), 30000);
+            t.once('url', (u) => { clearTimeout(timer); resolve(u); });
+            t.once('error', (e) => { clearTimeout(timer); reject(e); });   // spawn error ab crash nahi karega
+            t.once('exit', (c) => { clearTimeout(timer); reject(new Error('cloudflared exited early (code ' + c + ')')); });
+          });
+
+          currentBackendUrl = url;
+          publishServerStatus(url);
+          console.log(`\n🔒 Public HTTPS URL (Cloudflare): ${url}\n`);
+          console.log(`ℹ️  Frontend will auto-discover this via the Gist — no manual update needed.`);
+
+          t.on('error', (e) => console.log('[Cloudflare Tunnel] runtime error:', e.message));
+          t.on('exit', (code) => {
+            console.log(`[Cloudflare Tunnel] process exited (code ${code}) — reconnecting in 5s...`);
+            // Dead URL ko turant "offline" mark karo taaki frontend stale URL na dikhaye.
+            currentBackendUrl = null;
+            publishServerStatus(null);
+            scheduleRetry(5000);
+          });
+        } catch (e) {
+          console.log('[Cloudflare Tunnel] failed to start:', e.message, '— retrying in 5s...');
+          try { cfTunnel && cfTunnel.stop(); } catch (_) {}
+          scheduleRetry(5000);
+        }
+      };
+
+      await connectCloudflare();
     })();
   });
 }
