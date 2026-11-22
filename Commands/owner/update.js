@@ -1,13 +1,21 @@
 'use strict';
 
 /**
- * Update Command — GitHub-based auto-updater
+ * Update Command — GitHub-based auto-updater (v2: version-check + automatic restart)
  * ─────────────────────────────────────────────────────────────────────────
- * Source  : https://api.github.com/repos/mr-muneeb-ali-abbasi/muneeb-bot-updater/zipball/main
- * Version : https://raw.githubusercontent.com/mr-muneeb-ali-abbasi/muneeb-bot-updater/main/version.json
+ * Source  : utils/updateSource.js (zip of the update repo + version.json of the SAME repo)
+ *
+ * .update          → version check → NAYA version ho to: download → files copy → khud RESTART (exit 42, watchdog turant relaunch).
+ *                    Naya version na ho to "already latest" bolta hai — na download, na restart (baar-baar restart nahi lagta).
+ * .update force    → version same ho tab bhi dobara download + restart (kharab update ko theek karne ke liye).
+ * .update <zip_url>→ custom zip se (version check skip).
+ *
+ * Restart ke baad version.json naya hota hai, isliye agla `.update` "already latest" dega.
+ * npm packages: agar package.json ki dependencies badli hon to tmp/pending-install flag likhta hai —
+ * startup.js watchdog restart ke waqt (bot band hone par, poori RAM free) npm install chala deta hai.
  *
  * PRESERVED (never overwritten):
- *   node_modules/  sessions/  session/  data/  tmp/  temp/
+ *   node_modules/  sessions/  session/  data/  tmp/  temp/  bin/
  *   config.js  .env  cookies.txt  package-lock.json
  */
 
@@ -93,17 +101,22 @@ function downloadFile(url, dest, visited = new Set()) {
 
 function fetchJson(url) {
   return new Promise((resolve, reject) => {
-    https.get(url, {
-      headers: { 'User-Agent': 'MuneebAliBot-Updater/2.0', 'Accept': 'application/json' },
+    // ?t= : GitHub raw ka cache todne ke liye (purana version.json na mile)
+    const u = url + (url.includes('?') ? '&' : '?') + 't=' + Date.now();
+    const req = https.get(u, {
+      headers: { 'User-Agent': 'MuneebAliBot-Updater/2.0', 'Accept': 'application/json', 'Cache-Control': 'no-cache' },
       timeout: 10_000,
     }, res => {
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error(`HTTP ${res.statusCode} (version.json nahi mila)`)); }
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => {
-        try { resolve(JSON.parse(data)); }
+        try { resolve(JSON.parse(data.replace(/^\uFEFF/, '').replace(/,(\s*[}\]])/g, '$1'))); }
         catch { reject(new Error('Invalid JSON')); }
       });
-    }).on('error', reject);
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(new Error('Version check timed out')); });
   });
 }
 
@@ -125,7 +138,37 @@ function copyRecursive(src, dest, preserve, relPath = '', copied = []) {
   return copied;
 }
 
-async function updateViaZip(zipUrl, statusFn) {
+// ── helpers for the version check / dependency check ────────────────────────────
+function semverGt(a, b) {
+  const p = v => String(v || '0').replace(/[^0-9.]/g, '').split('.').map(n => parseInt(n, 10) || 0);
+  const x = p(a), y = p(b);
+  for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+  return false;
+}
+
+function readVersionFile(dir) {
+  try {
+    const j = JSON.parse(String(fs.readFileSync(path.join(dir, 'version.json'), 'utf8')).replace(/^\uFEFF/, ''));
+    return j && j.version ? String(j.version) : null;
+  } catch (_) { return null; }
+}
+
+function depsSnapshot(dir) {          // package.json ki dependencies (sorted) — badli ya nahi, ye jaanchne ke liye
+  try {
+    const p = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    const sort = o => Object.fromEntries(Object.entries(o || {}).sort(([a], [b]) => (a < b ? -1 : 1)));
+    return JSON.stringify({ d: sort(p.dependencies), o: sort(p.optionalDependencies), v: sort(p.overrides) });
+  } catch (_) { return ''; }
+}
+
+// Test ke liye har bahari kaam ek jagah (D) — production mein yehi asli functions hain.
+const D = {
+  fetchJson, downloadFile, extractZip,
+  sleep: (ms) => new Promise(r => setTimeout(r, ms)),
+  exit: (code) => process.exit(code),
+};
+
+async function updateViaZip(zipUrl, statusFn, { localVer, force }) {
   const cwd    = process.cwd();
   const tmpDir = path.join(cwd, 'tmp');
   fs.mkdirSync(tmpDir, { recursive: true });
@@ -133,144 +176,163 @@ async function updateViaZip(zipUrl, statusFn) {
   const zipPath   = path.join(tmpDir, `update_${Date.now()}.zip`);
   const extractTo = path.join(tmpDir, `update_extract_${Date.now()}`);
 
-  let copied;
   try {
-    await statusFn('⬇️ Downloading update from GitHub…');
-    await downloadFile(zipUrl, zipPath);
+    await statusFn('⬇️ Naya code download ho raha hai…');
+    await D.downloadFile(zipUrl, zipPath);
 
-    await statusFn('📦 Extracting…');
+    await statusFn('📦 Extract ho raha hai…');
     if (fs.existsSync(extractTo)) fs.rmSync(extractTo, { recursive: true, force: true });
-    await extractZip(zipPath, extractTo);
+    await D.extractZip(zipPath, extractTo);
 
     const entries       = fs.readdirSync(extractTo);
     const rootCandidate = entries.length === 1 ? path.join(extractTo, entries[0]) : extractTo;
     const srcRoot       = (fs.existsSync(rootCandidate) && fs.lstatSync(rootCandidate).isDirectory())
       ? rootCandidate : extractTo;
 
-    await statusFn('📋 Copying new files (preserving your data)…');
-    copied = copyRecursive(srcRoot, cwd, PRESERVE);
+    // Zip ka apna version dekho: GitHub ka raw version.json kabhi kabhi zip se pehle badal jata hai.
+    // Zip abhi purana ho to files copy mat karo (warna restart ke baad bhi purana version rehta aur loop banta).
+    const zipVer = readVersionFile(srcRoot);
+    if (!force && zipVer && !semverGt(zipVer, localVer)) {
+      return { skipped: true, zipVer, copied: [], depsChanged: false };
+    }
+
+    const depsBefore = depsSnapshot(cwd);
+
+    await statusFn('📋 Nayi files copy ho rahi hain (tumhara data safe rehta hai)…');
+    const copied = copyRecursive(srcRoot, cwd, PRESERVE);
 
     // Server par pehle se galat-case folder (purana Commands/) pada ho to usse bhi sahi/merge kar do
-    // (cache clear: abhi-abhi copy hui NAYI caseFix.js use ho, purani memory wali nahi)
     try {
       const cfPath = require.resolve('../../utils/caseFix');
       delete require.cache[cfPath];
       require(cfPath).fixCase(cwd);
     } catch (e) { console.warn('[Update] caseFix(cwd):', e.message); }
+
+    const depsChanged = depsBefore !== depsSnapshot(cwd);
+    return { skipped: false, zipVer, copied, depsChanged };
   } finally {
-    // success ho ya fail — tmp ka zip / extract folder hamesha saaf (pehle fail par pada rehta tha)
+    // success ho ya fail — tmp ka zip / extract folder hamesha saaf
     try { fs.rmSync(extractTo, { recursive: true, force: true }); } catch {}
     try { fs.unlinkSync(zipPath); } catch {}
   }
-
-  return copied;
 }
+
+let _updating = false;
 
 module.exports = {
   name        : 'update',
   aliases     : ['upgrade', 'botupdate'],
   category    : 'owner',
-  description : 'Update bot from GitHub (owner only)',
-  usage       : '.update [zip_url]',
+  description : 'Update bot from GitHub — version check, phir khud restart (owner only)',
+  usage       : '.update  |  .update force  |  .update <zip_url>',
   ownerOnly   : true,
+  _deps       : D,       // sirf tests ke liye
 
   async execute(sock, msg, args, extra) {
     const chatId = msg.key.remoteJid;
-    const zipUrl = (args[0] || GITHUB_ZIP_URL).trim();
+    const arg0   = String((args && args[0]) || '').trim();
+    const customZip = /^https?:\/\//i.test(arg0) ? arg0 : null;
+    const force  = customZip !== null || /^(force|-f|--force)$/i.test(arg0);
+    const zipUrl = customZip || GITHUB_ZIP_URL;
 
-    const statusMsg = await extra.reply('🔄 *Starting update…*');
+    if (_updating) return extra.reply('⏳ Update pehle se chal raha hai — thodi der ruko.');
+    _updating = true;
+
+    const statusMsg = await extra.reply('🔍 *Update check ho raha hai…*');
     const statusKey = statusMsg?.key;
-
     const statusFn = async (text) => {
       if (statusKey) {
         try { await sock.sendMessage(chatId, { text, edit: statusKey }); } catch (_) {}
       }
-      console.log('[Update]', text);
+      console.log('[Update]', String(text).replace(/\n/g, ' | '));
     };
 
+    let restarting = false;
     try {
-      let localVer  = '1.0.0';
-      let remoteVer = null;
+      let localVer = '1.0.0';
       try { localVer = require('../../utils/localVersion').getLocalVersion().version; } catch (_) {}
-      try {
-        const remote = await fetchJson(VERSION_URL);
-        remoteVer = remote?.version;
-      } catch (_) {}
 
-      if (remoteVer) {
-        await statusFn(
-          `📦 *Version check*\n• Local  : v${localVer}\n• Remote : v${remoteVer}\n\n⬇️ Downloading…`
-        );
-      }
-
-      const copied = await updateViaZip(zipUrl, statusFn);
-
-      // Install any new npm packages from the updated package.json
-      try {
-        await statusFn('📦 Installing dependencies…');
-        await run('npm install --production --no-audit --no-fund', { cwd: process.cwd() });
-      } catch (npmErr) {
-        console.warn('[Update] npm install warning:', npmErr.message);
-      }
-
-      // ── Hot-reload: runs BEFORE success message so new commands are live ────
-      const { loadCommands } = require('../../utils/commandLoader');
-
-      // Snapshot of command names BEFORE reload (to detect what's new)
-      const namesBefore = new Set();
-      try { for (const [k, v] of loadCommands()) { if (v.name === k) namesBefore.add(k); } } catch (_) {}
-
-      let reloadError = null;
-      try {
-        const { hotReloadCommands } = require('../../handler');
-        hotReloadCommands();
-        console.log('[Update] ✅ Hot-reload complete');
-      } catch (hrErr) {
-        reloadError = hrErr.message;
-        console.warn('[Update] ⚠️ Hot-reload error:', hrErr.message);
-      }
-
-      // Snapshot AFTER reload — detect new commands
-      const namesAfter  = new Set();
-      const newCmds     = [];
-      try {
-        for (const [k, v] of loadCommands()) {
-          if (v.name === k) {
-            namesAfter.add(k);
-            if (!namesBefore.has(k)) newCmds.push(k);
+      // ── 1) version check — naya version na ho to yahin ruk jao (na download, na restart) ──
+      let remoteVer = null;
+      if (!customZip) {
+        try {
+          const remote = await D.fetchJson(VERSION_URL);
+          remoteVer = remote && remote.version ? String(remote.version) : null;
+        } catch (e) {
+          if (!force) {
+            return await statusFn(`❌ *Version check fail hua:* ${e.message}\n\nThodi der baad dobara try karo, ya zabardasti update ke liye *.update force* likho.`);
           }
         }
-      } catch (_) {}
+        if (!remoteVer && !force) {
+          return await statusFn('❌ *Remote version nahi mila.*\n\nThodi der baad try karo, ya *.update force* likho.');
+        }
+        if (!force && !semverGt(remoteVer, localVer)) {
+          return await statusFn(
+            `✅ *Bot already latest hai!*\n\n📦 Tumhara version : *v${localVer}*\n🌐 Latest version  : *v${remoteVer}*\n\n` +
+            `Koi update nahi mila, isliye restart bhi nahi hua.\n_(Zabardasti dobara lagana ho to *.update force* likho.)_`
+          );
+        }
+      }
 
-      // Read version directly from disk (bypasses require.cache completely)
-      let newVer = remoteVer;
+      await statusFn(
+        `🚀 *Naya update mila!*\n\n📦 Abhi : *v${localVer}*\n🆕 Naya : *v${remoteVer || '?'}*${force && !customZip ? '\n⚙️ (force mode)' : ''}\n\n⬇️ Download shuru…`
+      );
+
+      // ── 2) download + copy ──
+      const res = await updateViaZip(zipUrl, statusFn, { localVer, force });
+
+      if (res.skipped) {
+        return await statusFn(
+          `⏳ *Update abhi tayyar nahi hua.*\n\nVersion check ne *v${remoteVer}* dikhaya, par download hui zip abhi *v${res.zipVer}* hai ` +
+          `(GitHub ko sync hone mein 1-5 minute lagte hain).\n\nBot ko *restart nahi kiya*. 2-5 minute baad dobara *.update* likho.`
+        );
+      }
+      if (!res.copied.length) throw new Error('Zip mein koi file nahi mili — update nahi hua.');
+
+      // ── 3) packages badle hon to watchdog ko batao (restart ke waqt npm install chalega) ──
+      if (res.depsChanged) {
+        try {
+          const dir = path.join(process.cwd(), 'tmp');
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(path.join(dir, 'pending-install'), String(Date.now()));
+        } catch (e) { console.warn('[Update] pending-install flag nahi likha:', e.message); }
+      }
+
+      let newVer = res.zipVer || remoteVer;
+      try { newVer = require('../../utils/localVersion').getLocalVersion().version || newVer; } catch (_) {}
+
+      // ── 4) restart ke baad owner ko "update ho gaya" ka message dene ke liye yaad rakho ──
       try {
-        newVer = require('../../utils/localVersion').getLocalVersion().version || newVer;
+        const dataDir = path.join(process.cwd(), 'data');
+        fs.mkdirSync(dataDir, { recursive: true });
+        const botNum = String((sock.user && sock.user.id) || '').split(':')[0].split('@')[0].replace(/[^0-9]/g, '');
+        fs.writeFileSync(path.join(dataDir, 'updateResult.json'),
+          JSON.stringify({ jid: chatId, number: botNum, from: localVer, to: newVer, files: res.copied.length, at: Date.now() }));
       } catch (_) {}
 
-      const newCmdLine = newCmds.length
-        ? `\n🆕 New commands: *${newCmds.join(', ')}*`
-        : '';
-      const reloadLine = reloadError
-        ? `\n⚠️ Reload warning: ${reloadError} — run .restart for full effect`
-        : `\n⚡ *${namesAfter.size} commands active (hot-reloaded — NO restart needed)*`;
+      await statusFn(
+        `✅ *Update ho gaya!*\n\n📁 Files updated : *${res.copied.length}*\n📦 Version : *v${localVer}* → *v${newVer}*\n` +
+        (res.depsChanged ? `📚 Naye packages restart ke waqt install honge (2-6 min lag sakte hain)\n` : '') +
+        `\n🔒 Safe rahe: sessions, data, config.js, .env\n\n🔁 *Bot ab khud restart ho raha hai…*\nKuch der mein wapas online aa jayega (hosting par jaane ki zaroorat nahi).`
+      );
 
-      const summary =
-        `✅ *Update complete!*\n\n` +
-        `📁 Files updated : *${copied.length}*\n` +
-        (newVer ? `📦 Version       : *v${newVer}*\n` : '') +
-        newCmdLine +
-        reloadLine +
-        `\n\n🔒 Preserved: sessions, data, config.js, .env\n` +
-        `✅ *Bot is still running — naye commands ABHI kaam kar rahe hain!*`;
-
-      await statusFn(summary);
-      // NO process.exit — bot stays running with hot-reloaded commands.
-      // Core-file changes (handler.js etc.) need a manual .restart
-
+      // ── 5) automatic restart: exit 42 = watchdog (startup.js) turant dobara chala deta hai ──
+      // Watchdog (WATCHDOG=1) ya PM2 ke bina exit karne se bot MAR jata (koi wapas chalane wala nahi) — tab exit nahi karte.
+      const supervised = process.env.WATCHDOG === '1' || process.env.pm_id !== undefined;
+      if (!supervised) {
+        return await statusFn(
+          `⚠️ *Files update ho gayi, par auto-restart nahi ho sakta* (bot watchdog ke bina chal raha hai).\n\n` +
+          `Hosting panel se ek baar *Restart* dabao — ya server ko *npm start* / *node startup.js* se chalao taa ki aage se khud restart ho.`
+        );
+      }
+      restarting = true;
+      await D.sleep(3500);          // message delivery ke liye thoda waqt
+      D.exit(42);
     } catch (error) {
       console.error('[Update] Failed:', error);
-      await statusFn(`❌ *Update failed:*\n${error.message}`);
+      await statusFn(`❌ *Update fail hua:*\n${error.message}\n\nBot restart nahi hua, purana code chal raha hai.`);
+    } finally {
+      if (!restarting) _updating = false;
     }
   },
 };

@@ -3,22 +3,29 @@
 const https  = require('https');
 const config = require('../../config');
 
-const VERSION_URL = config.updateVersionUrl ||
+// .update ke saath SAME repo (utils/updateSource.js)
+let _srcUrl = null;
+try { _srcUrl = require('../../utils/updateSource').versionUrl(); } catch (_) {}
+const VERSION_URL = _srcUrl || config.updateVersionUrl ||
   'https://raw.githubusercontent.com/mr-muneeb-ali-abbasi/muneeb-bot-updater/main/version.json';
 
 function fetchJson(url) {
   return new Promise((resolve, reject) => {
-    https.get(url, {
-      headers: { 'User-Agent': 'MuneebAliBot/1.0', 'Accept': 'application/json' },
+    const u = url + (url.includes('?') ? '&' : '?') + 't=' + Date.now();   // GitHub raw cache todne ke liye
+    const req = https.get(u, {
+      headers: { 'User-Agent': 'MuneebAliBot/2.0', 'Accept': 'application/json', 'Cache-Control': 'no-cache' },
       timeout: 10_000,
     }, res => {
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error(`HTTP ${res.statusCode} from GitHub`)); }
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => {
-        try { resolve(JSON.parse(data)); }
+        try { resolve(JSON.parse(data.replace(/^\uFEFF/, '').replace(/,(\s*[}\]])/g, '$1'))); }
         catch { reject(new Error('Invalid JSON from GitHub')); }
       });
-    }).on('error', reject).on('timeout', () => reject(new Error('Request timed out')));
+    });
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('Request timed out')));
   });
 }
 
@@ -54,9 +61,9 @@ module.exports = {
       let localVer = '1.0.0';
       let localDate = null;
       try {
-        const lv    = require('../../utils/localVersion').getLocalVersion();
-        localVer    = lv.version  || localVer;
-        localDate   = lv.releaseDate || null;
+        const lv  = require('../../utils/localVersion').getLocalVersion();   // version.json (update ke baad yahi badalta hai)
+        localVer  = lv.version     || localVer;
+        localDate = lv.releaseDate || null;
       } catch (_) {}
 
       await editStatus('📡 *Fetching remote version from GitHub…*');
@@ -66,7 +73,7 @@ module.exports = {
       const changelog  = remote?.changelog || remote?.changes || null;
 
       const hasUpdate  = semverGt(remoteVer, localVer);
-      const isUpToDate = !hasUpdate && remoteVer === localVer;
+      const isUpToDate = !hasUpdate && !semverGt(localVer, remoteVer);
 
       let text =
         `╭━━━❰ 🔍 *VERSION CHECK* ❱━━━╮\n` +
