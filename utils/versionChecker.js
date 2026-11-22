@@ -16,7 +16,10 @@ const path  = require('path');
 let config = {};
 try { config = require('../config'); } catch (_) {}
 
-const VERSION_URL = config.updateVersionUrl ||
+let _srcUrl = null;
+try { _srcUrl = require('./updateSource').versionUrl(); } catch (_) {}
+// update.js ke saath SAME repo (updateSource) — taa ki "update available" aur .update alag repo na dekhein
+const VERSION_URL = _srcUrl || config.updateVersionUrl ||
   'https://raw.githubusercontent.com/mr-muneeb-ali-abbasi/muneeb-bot-updater/main/version.json';
 
 const STATE_FILE = path.join(process.cwd(), 'data', 'updateNotified.json');
@@ -146,10 +149,32 @@ async function checkOnce(sock) {
   }
 }
 
+// .update ke baad bot restart hota hai; naya bot online aate hi owner ko "update ho gaya" ka message deta hai.
+// (.update ne data/updateResult.json likhi thi: kis number / chat se update chala, kaunsa version.)
+async function announceUpdateResult(sock) {
+  try {
+    const file = path.join(process.cwd(), 'data', 'updateResult.json');
+    if (!fs.existsSync(file)) return true;
+    const r = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!r || !r.jid || Date.now() - (r.at || 0) > 15 * 60 * 1000) { try { fs.unlinkSync(file); } catch (_) {} return true; }
+    const num = sock.user && sock.user.id ? sock.user.id.split(':')[0].split('@')[0].replace(/[^0-9]/g, '') : '';
+    if (!num || String(r.number) !== num) return true;          // kisi doosre session ka result hai
+    let now = r.to;
+    try { now = require('./localVersion').getLocalVersion().version || now; } catch (_) {}
+    await sock.sendMessage(r.jid, {
+      text: `✅ *Bot restart ho gaya!*\n\n📦 Ab *v${now}* chal raha hai (pehle v${r.from || '?'}).\n🔄 Update poora hua — ab dobara *.update* likhoge to "already latest" milega.`,
+    });
+    try { fs.unlinkSync(file); } catch (_) {}
+    console.log(`[VersionChecker] ✅ update-complete notice bheja → ${num}`);
+    return true;
+  } catch (e) { return false; }
+}
+
 /** Har connected session ke liye ek baar lagao (handler.initializeAntiCall se). */
 function watch(sock) {
   if (!sock || _timers.has(sock)) return;
   _timers.add(sock);
+  setTimeout(async () => { if (!(await announceUpdateResult(sock))) setTimeout(() => announceUpdateResult(sock), 30000); }, 12000);
   setTimeout(() => checkOnce(sock), 15000 + Math.floor(Math.random() * 10000));
   const t = setInterval(() => {
     if (sock.ws && (sock.ws.isClosed || sock.ws.isClosing)) return clearInterval(t);

@@ -1,35 +1,38 @@
 'use strict';
+
 /**
- * utils/localVersion.js — bot ka ASLI local version (ek hi jagah se, sab commands yahi use karein)
- * version.json (repo ka release version) aur package.json dono padhta hai, jo BADA ho wahi deta hai.
- * Is tarah package.json bump karna bhool bhi jao to .update / .menu / .checkupdate sahi version dikhayenge.
+ * utils/localVersion.js — bot ka LOCAL version (jo abhi server par chal raha hai)
+ * ─────────────────────────────────────────────────────────────────────────
+ * Source of truth : <bot folder>/version.json   (update zip yahi file naya karke deti hai)
+ * Fallback        : package.json "version"      (agar version.json abhi server par nahi hai)
+ *
+ * Har baar disk se padhta hai (require cache use nahi karta), isliye update ke baad
+ * naya version turant dikhta hai.
+ *
+ * Use: require('./localVersion').getLocalVersion()  →  { version: '1.5.6', releaseDate: '...', source: 'version.json' }
  */
+
 const fs   = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
 
 function readJson(file) {
-  try { return JSON.parse(String(fs.readFileSync(path.join(ROOT, file), 'utf8')).replace(/^\uFEFF/, '')); }
-  catch (_) { return null; }
+  try {
+    return JSON.parse(String(fs.readFileSync(file, 'utf8')).replace(/^\uFEFF/, ''));
+  } catch (_) { return null; }
 }
 
-function parse(v) { return String(v || '0').replace(/[^0-9.]/g, '').split('.').map(n => parseInt(n, 10) || 0); }
-function gt(a, b) {
-  const x = parse(a), y = parse(b);
-  for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
-  return false;
-}
-
-/** @returns {{version:string, releaseDate:(string|null)}} — hamesha fresh disk se (require cache nahi) */
 function getLocalVersion() {
-  const vj = readJson('version.json');
-  const pj = readJson('package.json');
-  const vV = vj && vj.version ? String(vj.version) : null;
-  const pV = pj && pj.version ? String(pj.version) : null;
-  let version = vV || pV || '1.0.0';
-  if (vV && pV && gt(pV, vV)) version = pV;
-  return { version, releaseDate: (vj && (vj.releaseDate || vj.date)) || (pj && pj.releaseDate) || null };
+  const v = readJson(path.join(ROOT, 'version.json'));
+  if (v && v.version) {
+    return { version: String(v.version), releaseDate: v.releaseDate || v.date || null, source: 'version.json' };
+  }
+  const p = readJson(path.join(ROOT, 'package.json'));
+  if (p && p.version) {
+    return { version: String(p.version), releaseDate: p.releaseDate || null, source: 'package.json' };
+  }
+  return { version: '1.0.0', releaseDate: null, source: 'default' };
 }
 
 module.exports = { getLocalVersion };
