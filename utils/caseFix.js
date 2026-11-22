@@ -9,6 +9,10 @@
  *   • dono maujood honge                  → galat-case wale ki bachi hui files sahi folder mein merge karta hai
  *                                           (sahi folder ki files hamesha jeetti hain), phir galat folder hata deta hai
  *
+ * Panel/Public/panel.html (admin panel /manage) bhi sahi jagah par laata hai: agar `Panel/public` (chhota p) aur
+ * `Panel/Public` dono ho gaye hon (server.js `Public` ko pehle dekhta hai) to unhe merge karta hai, aur panel.html kisi
+ * purani jagah par pada ho to `Panel/Public/` mein copy kar deta hai.
+ *
  * Use: require('./caseFix').fixCase(botFolder)  →  ['Commands → commands (renamed)', ...]
  * Kabhi throw nahi karta.
  */
@@ -42,6 +46,38 @@ function mergeDir(src, dest) {
   fs.rmSync(src, { recursive: true, force: true });
 }
 
+// ── Admin panel: Panel/Public/panel.html ("panel.html not found" ka ilaaj) ─────────────────────────────────────
+// panel/server.js pehle `Public` dekhta hai, na ho tabhi `public`. Update ke baad agar `Public` ban gaya (zip se)
+// par panel.html purane `public` mein reh gaya, to /manage "panel.html not found" deta hai.
+function healPanelHtml(root, done) {
+  try {
+    const panelDir = path.join(root, 'Panel');
+    if (!isDir(panelDir)) return;
+    const pubUp = path.join(panelDir, 'Public'), pubLo = path.join(panelDir, 'public');
+    const names = fs.readdirSync(panelDir);
+    // dono ho gaye (Linux) → chhote `public` ko bade `Public` mein merge karo (Public ki files jeetti hain)
+    if (names.includes('Public') && names.includes('public') && isDir(pubUp) && isDir(pubLo)) {
+      mergeDir(pubLo, pubUp);
+      done.push('Panel/public → Panel/Public (merged)');
+    }
+    const target = path.join(pubUp, 'panel.html');
+    if (fs.existsSync(target)) return;
+    // abhi bhi nahi mila → jaani-pehchani purani jagahon mein dhundo
+    const candidates = [
+      path.join(panelDir, 'public', 'panel.html'), path.join(panelDir, 'panel.html'),
+      path.join(root, 'Public', 'panel.html'), path.join(root, 'public', 'panel.html'), path.join(root, 'panel.html'),
+    ];
+    const found = candidates.find(f => { try { return fs.statSync(f).isFile(); } catch (_) { return false; } });
+    if (found) {
+      fs.mkdirSync(pubUp, { recursive: true });
+      fs.copyFileSync(found, target);
+      done.push(`panel.html ${path.relative(root, found)} → Panel/Public/panel.html (copied)`);
+    } else {
+      console.warn('[caseFix] ⚠️ panel.html kahin nahi mila — update repo mein Panel/Public/panel.html hona chahiye.');
+    }
+  } catch (e) { console.warn('[caseFix] panel.html:', e.message); }
+}
+
 function fixCase(root) {
   const done = [];
   let entries;
@@ -70,6 +106,7 @@ function fixCase(root) {
       }
     } catch (e) { console.warn(`[caseFix] ${canon}:`, e.message); }
   }
+  healPanelHtml(root, done);
   if (done.length) console.log('[caseFix]', done.join(' | '));
   return done;
 }
