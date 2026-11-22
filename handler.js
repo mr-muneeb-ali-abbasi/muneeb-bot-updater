@@ -29,6 +29,7 @@ const path = require('path');
 const axios = require('axios');
 const _strictGuard = require('./utils/strictGuard');
 const _antiGM = require('./utils/antiGroupMention');
+const _agms   = require('./utils/antiGroupMentionStatus');   // NEW: .antigroupmentionstatus (separate from .antigroupmention)
 const _antiUB = require('./utils/antiUserbot');
 const _nsfwShield = require('./utils/nsfwShield');
 const { isAutoStatusEnabled, isStatusReactEnabled, pickStatusEmoji } = require('./utils/autostatusConfig');
@@ -899,8 +900,6 @@ const _handleMessageInner = async (sock, msg) => {
       ? sock.user.id.split(':')[0] + '@s.whatsapp.net'
       : incomingSender;
     const isGroup = from.endsWith('@g.us');
-    // view-once media message aate hi save (utils/viewOnceStore.js) — .vv isi se reveal karta hai
-    try { require('./utils/viewOnceStore').capture(sock, msg); } catch (_) {}
 
     // ── Anti-fake: a new member stays MUTED until an admin verifies with .ok ──
     // Only a voice note is allowed through (admins need to hear it); everything else
@@ -942,7 +941,10 @@ const _handleMessageInner = async (sock, msg) => {
     const _isLeader = isGroup ? _leader.isLeader(sock, from, groupMetadata) : true;
 
     // ── Anti-Link: sabse pehle (kisi bhi message type par, jaise Payment-message ke andar chhupi link) — flood mein bhi tez ──
-    if (isGroup && _isLeader && !msg.key.fromMe && groupMetadata) {
+    // Group-status posts yahan SKIP karte hain (chahe unke andar link ho) — unhe
+    // AntiGMS/AntiGroupMention (niche) handle karte hain, taaki link-warning ki
+    // jagah sahi "GROUP STATUS WARNING" mile aur poora post delete ho (sirf link nahi).
+    if (isGroup && _isLeader && !msg.key.fromMe && groupMetadata && !_agms.detect(msg) && !_antiGM.detectGroupStatus(msg)) {
       try { if (await handleAntilink(sock, msg, groupMetadata, { commands })) return; } catch (_) {}
     }
     // Resolve bot-admin status ONCE per message — use cache aggressively to avoid live fetches
@@ -970,16 +972,36 @@ const _handleMessageInner = async (sock, msg) => {
       } catch (e) { console.error('[AntiBug]', e?.message || e); }
     }
 
-    // ── Anti-group-status — runs FIRST so a group-status post is always caught ──
-    // (warning on the 1st post, removal on the 2nd; English notices. See utils/antiGroupMention.js)
-    if (isGroup && !msg.key.fromMe) {
+    // ── Anti Group-Mention-Status (NEW command: .antigroupmentionstatus / .agms) ──
+    // Runs BEFORE the old .antigroupmention logic. When this feature is ON in the group it
+    // handles (delete + warn/kick) and consumes the message, so the old logic never double-acts.
+    // When it is OFF nothing changes: the old logic below runs exactly as before.
+    if (isGroup && !msg.key.fromMe && _isLeader) {
       try {
-        if (_antiGM.detectGroupStatus(msg)) {
-          const _consumed = await handleAntigroupmention(sock, msg, groupMetadata, { sender, senderIsOwner: isOwner(sender) });
-          if (_consumed) return;
+        const _gsN = database.getGroupSettings(from);
+        if (_gsN.antigroupmentionstatus) {
+          if (_agms.detect(msg)) {
+            const _pj = msg.key.participant || sender;
+            const _sOwner = isOwner(sender) || isOwner(_pj);
+            const _sAdmin = _sOwner ? false : ((await isAdmin(sock, sender, from, groupMetadata)) || (await isAdmin(sock, _pj, from, groupMetadata)));
+            const _bAdmin = await isBotAdmin(sock, from, groupMetadata);
+            await _agms.enforce(sock, msg, {
+              senderIsAdmin: _sAdmin, senderIsOwner: _sOwner, botIsAdmin: _bAdmin,
+              mode: (_gsN.antigroupmentionstatusMode || 'warn').toLowerCase(),
+              limit: _gsN.antigroupmentionstatusLimit || 2,
+              recheckBotAdmin: async () => { invalidateBotAdminCache(from); return isBotAdmin(sock, from, groupMetadata); },
+            });
+            return;
+          }
+          _agms.noteUnknown(msg);
         }
-      } catch (e) { console.error('[AntiGroupMention]', e); }
+      } catch (e) { console.error('[AntiGMS]', e); }
     }
+
+    // Group-status posts ab is jagah se handle NAHI hote — woh poori tarah
+    // .antigroupmentionstatus (AntiGMS block, upar) ka kaam hai. .antigroupmention
+    // ab sirf normal forwarded/mention detection karta hai (niche, line ~1150
+    // wale general call se) — iska apna alag early-exit ab zaroori nahi.
 
     // ── Anti-delete (PERSONAL / DM): `.antideleteDM on` → deleted DM messages are sent to THIS bot's own chat ──
     if (msg.message?.protocolMessage?.type === 0 && !isGroup && !msg.key.fromMe) {
@@ -1389,7 +1411,7 @@ const _handleMessageInner = async (sock, msg) => {
           if (handled) return;
         } catch (_) {}
       }
-      if (isGroup && _isLeader) { try { await handleAntilink(sock, msg, groupMetadata); } catch (e) { console.error('[AntiLink]', e); } }
+      if (isGroup && _isLeader && !_agms.detect(msg) && !_antiGM.detectGroupStatus(msg)) { try { await handleAntilink(sock, msg, groupMetadata); } catch (e) { console.error('[AntiLink]', e); } }
       try {
         const chatbot = getChatbot();
         if (chatbot?.handleChatbotResponse) {
@@ -1800,26 +1822,17 @@ const handleAntigroupmention = async (sock, msg, groupMetadata, opts = {}) => {
     if (!gs.antigroupmention) return false;
     if (!_leader.isLeader(sock, from, groupMetadata)) return false;   // another panel bot in this group handles it
 
-    // ── Group-status posts / group-status mentions → warn (1st) / remove (2nd) ──
-    if (_antiGM.detectGroupStatus(msg)) {
-      const senderIsAdmin = await isAdmin(sock, sender, from, groupMetadata);
-      const senderIsOwner = typeof opts.senderIsOwner === 'boolean'
-        ? opts.senderIsOwner
-        : (isOwnerNumber(normalizeJidWithLid(sender).split('@')[0].split(':')[0]) || isOwnerNumber(sender.split('@')[0].split(':')[0]));
-      const botIsAdmin = await isBotAdmin(sock, from, groupMetadata);
-      return await _antiGM.enforce(sock, msg, {
-        senderIsAdmin, senderIsOwner, botIsAdmin,
-        mode: (gs.antigroupmentionMode || 'warn').toLowerCase(),
-      });
-    }
+    // Group-status posts yahan se HATA diye gaye — ab yeh sirf .antigroupmentionstatus
+    // (utils/antiGroupMentionStatus.js) ka kaam hai. .antigroupmention sirf normal
+    // forwarded-message/mention detection karta hai, group-status ko chhuta hi nahi.
+    if (_antiGM.detectGroupStatus(msg)) return false;
 
-    // ── Legacy: forwarded-message detection (unchanged) ──
+    // ── Forwarded-message detection (normal mention/forward — group-status alag se) ──
 
     let isForwarded = false;
     if (msg.message) {
       const m = msg.message;
-      isForwarded = !!(m.groupStatusMentionMessage ||
-        (m.protocolMessage?.type === 25) ||
+      isForwarded = !!(
         m.extendedTextMessage?.contextInfo?.forwardedNewsletterMessageInfo ||
         m.imageMessage?.contextInfo?.forwardedNewsletterMessageInfo ||
         m.videoMessage?.contextInfo?.forwardedNewsletterMessageInfo ||
