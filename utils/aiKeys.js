@@ -19,7 +19,19 @@ const DEFAULTS = {   // public repo: no keys here — real keys live in data/aiK
   gemini:  [],
   mistral: [],
 };
-const PROVIDERS = ['groq', 'gemini', 'mistral', 'openrouter', 'cerebras'];
+const PROVIDERS = ['groq', 'gemini', 'mistral', 'openrouter', 'cerebras', 'nvidia', 'sambanova', 'github'];
+
+// where to get a FREE key for each provider (shown by `.aikey providers`)
+const SIGNUP = {
+  groq:       'https://console.groq.com/keys',
+  gemini:     'https://aistudio.google.com/apikey',
+  cerebras:   'https://cloud.cerebras.ai (API Keys)',
+  openrouter: 'https://openrouter.ai/keys  (sirf :free models use hote hain)',
+  mistral:    'https://console.mistral.ai/api-keys  (free "Experiment" plan)',
+  nvidia:     'https://build.nvidia.com  (Get API Key)',
+  sambanova:  'https://cloud.sambanova.ai  (API Keys)',
+  github:     'https://github.com/settings/personal-access-tokens  (permission: Models → read)',
+};
 
 function readFile() { try { return JSON.parse(fs.readFileSync(FILE, 'utf8')) || {}; } catch (_) { return {}; } }
 function writeFile(o) { try { fs.mkdirSync(path.dirname(FILE), { recursive: true }); fs.writeFileSync(FILE, JSON.stringify(o, null, 2)); } catch (_) {} }
@@ -85,4 +97,4 @@ function summary() {
   return PROVIDERS.map(p => ({ provider: p, keys: all(p).map(k => ({ key: mask(k), parked: isParked(k) })) })).filter(x => x.keys.length);
 }
 
-module.exports = { all, usable, report, ok, park, add, remove, summary, PROVIDERS };
+module.exports = { all, usable, report, ok, park, add, remove, summary, PROVIDERS, SIGNUP };
