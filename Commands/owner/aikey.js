@@ -2,7 +2,8 @@
 /**
  * .aikey — manage the AI API keys used by the chatbot / voice bot (main owner only)
  *   .aikey list
- *   .aikey add <groq|gemini|mistral|openrouter|cerebras> <key>
+ *   .aikey add <groq|gemini|cerebras|openrouter|mistral|nvidia|sambanova|github> <key>
+ *   .aikey providers       → har provider ka FREE signup link
  *   .aikey remove <provider> <key or its last 4+ characters>
  *   .aikey test            → asks the AI one question and tells which provider answered
  * The message that contains a key is deleted right away.
@@ -34,6 +35,14 @@ module.exports = {
       } catch (e) { return sock.sendMessage(from, { text: `❌ ${e.message}` }); }
     }
 
+    if (sub === 'providers' || sub === 'free') {
+      return say('🆓 *Free AI keys kahan se milengi*\n\n' +
+        keys.PROVIDERS.map(p => `• *${p}* → ${keys.SIGNUP[p] || ''}`).join('\n') +
+        '\n\nKey milne par: *.aikey add <provider> <key>*  (message apne aap delete ho jata hai)\n' +
+        'Koi bhi 1-2 provider kaafi hain (Groq + Gemini sabse aasaan). Model ke naam khud update hote rehte hain.\n\n' +
+        'Bina key ke bhi OVH / LLM7 / Pollinations last-resort ki tarah chalte hain, par slow aur kam bharose ke.');
+    }
+
     if (sub === 'test') {
       const { askAI } = require('../../utils/aiEngine');
       const t0 = Date.now();
@@ -43,6 +52,6 @@ module.exports = {
 
     const rows = keys.summary();
     return say('🔑 *AI Keys*\n\n' + (rows.length ? rows.map(r => `*${r.provider}*\n` + r.keys.map(k => `  • ${k.key}${k.parked ? ' ⏸️ (abhi band/limit)' : ''}`).join('\n')).join('\n\n') : 'Koi key nahi.') +
-      '\n\n.aikey add <provider> <key>\n.aikey remove <provider> <key>\n.aikey test');
+      '\n\n.aikey add <provider> <key>\n.aikey remove <provider> <key>\n.aikey providers (free signup links)\n.aikey test');
   },
 };

@@ -34,7 +34,8 @@ function statusText(gs) {
     `• *.antigroupmention off*\n` +
     `• *.antigroupmention set warn | delete | kick*\n` +
     `• *.antigroupmention reset* — sabki warnings saaf\n\n` +
-    `_Admins aur bot owner par kuch nahi lagta._`
+    `_Admins aur bot owner par kuch nahi lagta._\n` +
+    `_Sirf WhatsApp "Group Status" mention ke liye hai — plain forwarded messages ke liye .antiforward use karo._`
   );
 }
 
