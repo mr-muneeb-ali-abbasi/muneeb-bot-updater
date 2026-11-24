@@ -1,34 +1,33 @@
 'use strict';
 
 /**
- * AI Engine v7 — key-managed, self-healing
- * ─────────────────────────────────────────────────────────────────────────────
- *  1. Groq      (owner keys → llama-3.3-70b → llama-4-scout → llama-3.1-8b)
- *  2. Gemini    (owner keys → 2.0-flash → 2.5-flash → 2.0-flash-lite)
- *  3. Mistral   (owner keys → mistral-small → open-mistral-nemo)
- *  4. OpenRouter / Cerebras (only if a key was added with .aikey)
- *  5. Free, key-less last resorts: LLM7, Pollinations, OVH
+ * AI Engine v8 — key-managed, self-healing, model auto-discovery
+ * ────────────────────────────────────────────────────────────────────────────────────────
+ *  Keyed providers (free tiers — add keys with `.aikey add <provider> <key>`; `.aikey providers` shows the signup links):
+ *    groq · cerebras · gemini · openrouter (:free models) · mistral · nvidia · sambanova · github
+ *  Key-less last resorts (no signup): OVHcloud anonymous · LLM7 · Pollinations (anonymous host)
  *
- *  Keys live in utils/aiKeys.js: expired keys (401/403) are parked 6 h, rate-limited
- *  ones (429) for 1 min, so the next key/model is used instantly. Add keys any time with
- *  `.aikey add <provider> <key>` — no code change needed.
+ *  WHY v8: free-tier model names expire all the time (e.g. gemini-2.0-flash was shut down on 2026-06-01), which silently
+ *  broke every older version of this file. Now each provider's REAL model list is fetched with the key (cached 6 h) and the
+ *  best current chat model is chosen from it. The hard-coded names below are only a fallback if the list call itself fails.
+ *
+ *  Keys: expired keys (401/403) are parked 6 h, rate-limited ones (429/503) for 1 min, bad model (400/404) for 10 min,
+ *  so the next key / model / provider is used instantly. Keys rotate round-robin.
  *
  *  Public API (unchanged):  getAIResponse(system, user, history, userId) → { text, api, ms } | null
- *  New:                      askAI({ system, user, history, json, maxTokens, temperature, userId })
+ *                           askAI({ system, user, history, json, raw, prefer, maxTokens, temperature, userId })
  */
 
 const fetch = require('node-fetch');
 const keys  = require('./aiKeys');
 
-const GROQ_MODELS    = ['llama-3.3-70b-versatile', 'meta-llama/llama-4-scout-17b-16e-instruct', 'llama-3.1-8b-instant'];
-const GEMINI_MODELS  = ['gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-2.0-flash-lite'];
-const MISTRAL_MODELS = ['mistral-small-latest', 'open-mistral-nemo'];
-const OPENROUTER_MODELS = ['meta-llama/llama-3.3-70b-instruct:free', 'google/gemma-3-27b-it:free'];
-const CEREBRAS_MODELS   = ['llama-3.3-70b', 'llama3.1-8b'];
-
-const TIMEOUT_MS = 18_000;
-const CASCADE_MS = 45_000;
-const MAX_CONCURRENT = 8;
+const TIMEOUT_MS      = 18_000;
+const LIST_TIMEOUT_MS = 8_000;
+const CASCADE_MS      = 45_000;
+const MAX_CONCURRENT  = 8;
+const MODELS_PER_PROVIDER = 2;          // at most this many models are tried per key before moving on
+const LIST_TTL_MS     = 6 * 3600_000;
+const LIST_RETRY_MS   = 30 * 60_000;
 
 const BOT_NAME = (() => { try { return require('../config').botName; } catch { return 'Mr.Muneeb Ali Bot'; } })();
 
@@ -38,7 +37,7 @@ const HIDE_RULE =
   `aur "as an AI language model" jaisa kuch mat bolo. Agar koi puche tu kaun hai / kaunsa AI / kaunsi API / kisne banaya, sirf yeh kaho: ` +
   `"Main ${BOT_NAME} hoon, mujhe Muneeb Ali ne banaya hai."`;
 
-// ── semaphore + per-user queue ──────────────────────────────────────────────────
+// ── semaphore + per-user queue ───────────────────────────────────────────────────────────────────────────
 let _active = 0; const _wait = [];
 const acquire = () => new Promise(res => { const t = () => { if (_active < MAX_CONCURRENT) { _active++; res(); } else _wait.push(t); }; t(); });
 const release = () => { _active = Math.max(0, _active - 1); if (_wait.length) _wait.shift()(); };
@@ -72,15 +71,144 @@ function clean(text) {
   return out.length > 1 ? out : null;
 }
 
-// ── generic OpenAI-compatible call ──────────────────────────────────────────────
-async function callOpenAICompat(url, key, model, o, extraHeaders = {}) {
-  const messages = [{ role: 'system', content: o.system }, ...o.history.slice(-10), { role: 'user', content: o.user }];
-  const body = { model, messages, max_tokens: o.maxTokens, temperature: o.temperature };
-  if (o.json) body.response_format = { type: 'json_object' };
-  const res = await fetchTimeout(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}`, ...extraHeaders }, body: JSON.stringify(body) });
-  if (!res.ok) { const e = new Error(`HTTP ${res.status}: ${(await res.text().catch(() => '')).slice(0, 120)}`); e.status = res.status; throw e; }
+// ── model discovery ─────────────────────────────────────────────────────────────────────────────
+// "3.5" / "3-5" / "3.3-70b" → comparable number, so newer versions sort first.
+function versionOf(id) {
+  const m = String(id).match(/(\d+)(?:[.\-_](\d+))?/);
+  return m ? Number(m[1]) * 1000 + Number(m[2] || 0) : 0;
+}
+
+/** order a live model list: each `prefer` regex in turn (newest version first inside a regex), then the rest */
+function pickModels(p, live) {
+  const out = [];
+  const add = (id) => { if (id && !out.includes(id)) out.push(id); };
+  if (Array.isArray(live) && live.length) {
+    const usable = live.filter(id => !(p.skip && p.skip.test(id)));
+    for (const re of p.prefer || []) {
+      usable.filter(id => re.test(id)).sort((a, b) => versionOf(b) - versionOf(a)).forEach(add);
+    }
+    if (!out.length) usable.slice(0, MODELS_PER_PROVIDER).forEach(add);
+  } else {
+    (p.fallback || []).forEach(add);
+  }
+  return out.slice(0, MODELS_PER_PROVIDER);
+}
+
+const _listCache = new Map();   // provider name → { at, ids|null, ttl }
+async function modelsFor(p, key) {
+  const c = _listCache.get(p.name);
+  if (c && Date.now() - c.at < c.ttl) return pickModels(p, c.ids);
+  let ids = null;
+  try { ids = await p.list(key); } catch (e) { console.warn(`[AI-Engine] model list ${p.name}: ${e.message} (fallback names used)`); }
+  _listCache.set(p.name, { at: Date.now(), ids, ttl: ids ? LIST_TTL_MS : LIST_RETRY_MS });
+  return pickModels(p, ids);
+}
+
+// OpenAI-style  GET {base}/models  → data[].id
+const listOpenAI = (base, extra) => async (key) => {
+  const headers = key ? { Authorization: `Bearer ${key}` } : {};
+  const res = await fetchTimeout(`${base}/models`, { headers }, LIST_TIMEOUT_MS);
+  if (!res.ok) throw new Error('HTTP ' + res.status);
   const data = await res.json();
-  return data?.choices?.[0]?.message?.content;
+  const arr = Array.isArray(data) ? data : (data.data || data.models || []);
+  return (extra ? extra(arr) : arr).map(m => (typeof m === 'string' ? m : m.id)).filter(Boolean);
+};
+
+const NOT_CHAT = /embed|whisper|tts|speech|audio|transcri|moderation|guard|rerank|image|vision-only|dall|diffusion|flux|safety|ocr/i;
+
+// ── provider tables ────────────────────────────────────────────────────────────────────────────
+const KEYED = [
+  { name: 'groq', base: 'https://api.groq.com/openai/v1', skip: NOT_CHAT,
+    list: listOpenAI('https://api.groq.com/openai/v1'),
+    prefer: [/llama-3\.3-70b/, /gpt-oss-120b/, /llama-4/, /qwen3/, /llama-3\.1-8b/],
+    fallback: ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b'] },
+  { name: 'cerebras', base: 'https://api.cerebras.ai/v1', skip: NOT_CHAT,
+    list: listOpenAI('https://api.cerebras.ai/v1'),
+    prefer: [/gpt-oss-120b/, /llama-?3\.3-70b/, /qwen-?3.*(235b|instruct)/, /llama-?4/, /llama-?3\.1-8b/],
+    fallback: ['gpt-oss-120b', 'llama-3.3-70b'] },
+  { name: 'gemini', native: 'gemini',
+    // /v1beta/models → only chat-capable, stable-looking flash models; newest first (gemini-3.x before 2.x)
+    list: async (key) => {
+      const res = await fetchTimeout('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', { headers: { 'x-goog-api-key': key } }, LIST_TIMEOUT_MS);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      return (data.models || [])
+        .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+        .map(m => String(m.name || '').replace(/^models\//, ''))
+        .filter(id => /^gemini-[\d.]+-flash(-lite)?$/.test(id));
+    },
+    prefer: [/^gemini-[\d.]+-flash$/, /^gemini-[\d.]+-flash-lite$/],
+    fallback: ['gemini-3.5-flash', 'gemini-3.1-flash-lite'] },
+  { name: 'openrouter', base: 'https://openrouter.ai/api/v1', skip: NOT_CHAT,
+    extraHeaders: { 'HTTP-Referer': 'https://mr-muneeb-ali-bot.vercel.app', 'X-Title': 'Mr.Muneeb Ali Bot' },
+    // only models that cost nothing (id ends with :free)
+    list: listOpenAI('https://openrouter.ai/api/v1', arr => arr.filter(m => /:free$/.test(m.id || ''))),
+    prefer: [/llama-3\.3-70b/, /gpt-oss-120b/, /qwen3.*(235b|80b|instruct)/, /gemma-3-27b/, /deepseek/, /mistral/],
+    fallback: ['meta-llama/llama-3.3-70b-instruct:free', 'openai/gpt-oss-120b:free'] },
+  { name: 'mistral', base: 'https://api.mistral.ai/v1', skip: NOT_CHAT,
+    list: listOpenAI('https://api.mistral.ai/v1'),
+    prefer: [/^mistral-small-latest$/, /^mistral-medium-latest$/, /^open-mistral-nemo$/, /^ministral-8b-latest$/],
+    fallback: ['mistral-small-latest', 'open-mistral-nemo'] },
+  { name: 'nvidia', base: 'https://integrate.api.nvidia.com/v1', skip: NOT_CHAT,
+    list: listOpenAI('https://integrate.api.nvidia.com/v1'),
+    prefer: [/meta\/llama-3\.3-70b/, /gpt-oss-120b/, /llama-3\.1-70b/, /mistral.*small/, /llama-3\.1-8b/],
+    fallback: ['meta/llama-3.3-70b-instruct', 'meta/llama-3.1-8b-instruct'] },
+  { name: 'sambanova', base: 'https://api.sambanova.ai/v1', skip: NOT_CHAT,
+    list: listOpenAI('https://api.sambanova.ai/v1'),
+    prefer: [/Llama-3\.3-70B/i, /gpt-oss/i, /Llama-4/i, /Meta-Llama-3\.1-8B/i],
+    fallback: ['Meta-Llama-3.3-70B-Instruct'] },
+  { name: 'github', base: 'https://models.github.ai/inference', skip: NOT_CHAT,
+    // GitHub Models: any personal access token with the "models" permission
+    list: async (key) => {
+      const res = await fetchTimeout('https://models.github.ai/catalog/models', { headers: { Authorization: `Bearer ${key}`, Accept: 'application/vnd.github+json' } }, LIST_TIMEOUT_MS);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const arr = await res.json();
+      return (Array.isArray(arr) ? arr : []).map(m => m.id).filter(Boolean);
+    },
+    prefer: [/gpt-4\.1-mini/, /gpt-4o-mini/, /llama-3\.3-70b/i, /mistral.*small/i],
+    fallback: ['openai/gpt-4.1-mini', 'openai/gpt-4o-mini'] },
+];
+
+// key-less last resorts
+const FREE = [
+  { name: 'ovh', base: 'https://oai.endpoints.kepler.ai.cloud.ovh.net/v1', skip: NOT_CHAT,
+    list: listOpenAI('https://oai.endpoints.kepler.ai.cloud.ovh.net/v1'),
+    prefer: [/Mistral-Small/i, /Llama-3\.3-70B/i, /gpt-oss/i, /Qwen3/i, /Llama/i],
+    fallback: ['Mistral-Small-3.2-24B-Instruct-2506'], key: 'anonymous' },
+  { name: 'llm7', base: 'https://api.llm7.io/v1', skip: NOT_CHAT,
+    list: listOpenAI('https://api.llm7.io/v1'),
+    prefer: [/^default$/, /^fast$/, /gpt-4\.1/, /llama/i],
+    fallback: ['default'], key: 'unused' },
+  { name: 'pollinations', base: 'https://text.pollinations.ai/openai', url: 'https://text.pollinations.ai/openai', fixedModel: 'openai', skip: NOT_CHAT, key: 'unused' },
+];
+
+// ── callers ──────────────────────────────────────────────────────────────────────────────
+function httpError(res, bodyText) {
+  const e = new Error(`HTTP ${res.status}: ${String(bodyText || '').slice(0, 120)}`);
+  e.status = res.status;
+  return e;
+}
+
+async function callOpenAICompat(p, key, model, o) {
+  const url = p.url || `${p.base}/chat/completions`;
+  const messages = [{ role: 'system', content: o.system }, ...o.history.slice(-10), { role: 'user', content: o.user }];
+  const build = (withJson) => {
+    const body = { model, messages, max_tokens: o.maxTokens, temperature: o.temperature };
+    if (/gpt-oss/i.test(model)) body.reasoning_effort = 'low';      // reasoning models: keep tokens for the real answer
+    if (withJson) body.response_format = { type: 'json_object' };
+    return JSON.stringify(body);
+  };
+  const send = (withJson) => fetchTimeout(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(key ? { Authorization: `Bearer ${key}` } : {}), ...(p.extraHeaders || {}) },
+    body: build(withJson),
+  });
+  let res = await send(!!o.json);
+  if (res.status === 400 && o.json) res = await send(false);        // model without JSON mode → ask normally, caller parses
+  if (!res.ok) throw httpError(res, await res.text().catch(() => ''));
+  const data = await res.json();
+  const msg = data?.choices?.[0]?.message;
+  return msg?.content || '';
 }
 
 async function callGemini(key, model, o) {
@@ -94,74 +222,63 @@ async function callGemini(key, model, o) {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
     body: JSON.stringify({ system_instruction: { parts: [{ text: o.system }] }, contents, generationConfig: gen }),
   });
-  if (!res.ok) { const e = new Error(`HTTP ${res.status}: ${(await res.text().catch(() => '')).slice(0, 120)}`); e.status = res.status; throw e; }
+  if (!res.ok) throw httpError(res, await res.text().catch(() => ''));
   const data = await res.json();
-  return (data?.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
+  return (data?.candidates?.[0]?.content?.parts || []).filter(p => !p.thought).map(p => p.text || '').join('');
 }
 
-// ── provider table ──────────────────────────────────────────────────────────────
-const KEYED = [
-  { name: 'groq',       models: GROQ_MODELS,       call: (k, m, o) => callOpenAICompat('https://api.groq.com/openai/v1/chat/completions', k, m, o) },
-  { name: 'gemini',     models: GEMINI_MODELS,     call: callGemini },
-  { name: 'mistral',    models: MISTRAL_MODELS,    call: (k, m, o) => callOpenAICompat('https://api.mistral.ai/v1/chat/completions', k, m, o) },
-  { name: 'cerebras',   models: CEREBRAS_MODELS,   call: (k, m, o) => callOpenAICompat('https://api.cerebras.ai/v1/chat/completions', k, m, o) },
-  { name: 'openrouter', models: OPENROUTER_MODELS, call: (k, m, o) => callOpenAICompat('https://openrouter.ai/api/v1/chat/completions', k, m, o, { 'HTTP-Referer': 'https://mr-muneeb-ali-bot.vercel.app', 'X-Title': 'Mr.Muneeb Ali Bot' }) },
-];
+const callProvider = (p, key, model, o) => (p.native === 'gemini' ? callGemini(key, model, o) : callOpenAICompat(p, key, model, o));
 
-// free, key-less last resorts
-const FREE = [
-  { name: 'llm7', call: (o) => callOpenAICompat('https://api.llm7.io/v1/chat/completions', 'unused', 'default', { ...o, json: false }) },
-  { name: 'pollinations', call: async (o) => {
-      const messages = [{ role: 'system', content: o.system }, ...o.history.slice(-6), { role: 'user', content: o.user }];
-      const res = await fetchTimeout('https://text.pollinations.ai/openai', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'openai', messages, seed: Math.floor(Math.random() * 9999) }) }, 15000);
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      return (await res.json())?.choices?.[0]?.message?.content;
-  } },
-  { name: 'pollinations-get', call: async (o) => {
-      const res = await fetchTimeout(`https://text.pollinations.ai/${encodeURIComponent(`${o.system}\n\nUser: ${o.user}\n${BOT_NAME}:`.slice(0, 6000))}`, {}, 15000);
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      return res.text();
-  } },
-  { name: 'ovh', call: (o) => callOpenAICompat('https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/chat/completions', 'anonymous', 'Mistral-Small-3.2-24B-Instruct-2506', { ...o, json: false }) },
-];
-
+// ── the cascade ───────────────────────────────────────────────────────────────────────────────
 async function _run(o) {
   const t0 = Date.now(); const ms = () => Date.now() - t0;
   const out = (text, api) => { console.log(`[AI-Engine] ✅ ${api} → ${ms()}ms`); return { text, api, ms: ms() }; };
+  const finish = (raw) => ((o.json || o.raw) ? String(raw || '').trim() : clean(raw));
 
   const order = o.prefer ? [...KEYED].sort((a, b) => (b.name === o.prefer) - (a.name === o.prefer)) : KEYED;
   for (const p of order) {
-    for (const model of p.models) {
+    const all = keys.all(p.name);
+    if (!all.length) continue;                                        // no key for this provider → skip silently
+    const models = await modelsFor(p, all[0]);
+    for (const model of models) {
       for (const key of keys.usable(p.name, model)) {
         if (ms() >= CASCADE_MS) { console.error('[AI-Engine] time budget exceeded'); return null; }
         try {
-          const raw = await p.call(key, model, o);
-          const text = (o.json || o.raw) ? String(raw || '').trim() : clean(raw);
+          const raw = await callProvider(p, key, model, o);
+          const text = finish(raw);
           if (text) { keys.ok(key, model); return out(text, `${p.name}/${model}`); }
           keys.report(key, model, 400);
         } catch (e) {
           const kind = keys.report(key, model, e.status || 0);
           console.warn(`[AI-Engine] ❌ ${p.name}/${model} …${key.slice(-4)} (${kind}): ${e.message}`);
-          if (kind === 'dead') break;          // key is dead → skip its other models too
+          if (kind === 'badmodel') _listCache.delete(p.name);          // model vanished → re-read the live list next time
+          if (kind === 'dead') break;                                  // key is dead → skip its other models too
         }
       }
     }
   }
+
   for (const f of FREE) {
     if (ms() >= CASCADE_MS) break;
     try {
-      const raw = await f.call(o);
-      const text = (o.json || o.raw) ? String(raw || '').trim() : clean(raw);
-      if (text) return out(text, f.name);
+      const models = f.fixedModel ? [f.fixedModel] : await modelsFor(f, null);
+      for (const model of models) {
+        if (ms() >= CASCADE_MS) break;
+        try {
+          const raw = await callOpenAICompat(f, f.key, model, { ...o, json: false });
+          const text = finish(raw);
+          if (text) return out(text, `${f.name}/${model}`);
+        } catch (e) {
+          console.warn(`[AI-Engine] ❌ ${f.name}/${model}: ${e.message}`);
+          if (e.status === 404 || e.status === 400) _listCache.delete(f.name);
+        }
+      }
     } catch (e) { console.warn(`[AI-Engine] ❌ ${f.name}: ${e.message}`); }
   }
-  console.error(`[AI-Engine] 💀 every provider failed (${ms()}ms)`);
+  console.error(`[AI-Engine] 💀 every provider failed (${ms()}ms) — add a free key with .aikey add <provider> <key> (see .aikey providers)`);
   return null;
 }
 
-/**
- * @param {{system:string,user:string,history?:Array,json?:boolean,maxTokens?:number,temperature?:number,userId?:string}} opts
- */
 function askAI(opts) {
   const o = {
     system: String(opts.system || '') + HIDE_RULE,
@@ -183,4 +300,4 @@ async function getAIResponse(systemPrompt, userMessage, history = [], userId = '
   return askAI({ system: systemPrompt, user: userMessage, history, userId });
 }
 
-module.exports = { getAIResponse, askAI };
+module.exports = { getAIResponse, askAI, _internals: { pickModels, versionOf, KEYED, FREE, clean } };

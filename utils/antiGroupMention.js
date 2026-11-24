@@ -39,22 +39,32 @@ const _seenMsg = new Map();        // msgId → ts
 
 const digits = (v) => String(v || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
 
-// ── detection ────────────────────────────────────────────────────────────────
+// ── detection ────────────────────────────────────────────────────────────────────────────────
+// Naye WhatsApp/Baileys versions wrapper ka naam badalte rehte hain, isliye ab 3 tareeke se dhundhte hain:
+//   1) upar ki known keys,  2) kisi bhi wrapper ke andar (.message) utarkar,  3) naam se (groupStatus* / statusMention*)
+const STATUS_NAME_RE = /^(groupStatus\w*|statusMention\w*|groupMentionedMessage)$/i;   // 'groupMentions' (normal @group mention) jaan-bujhkar bahar
 function detectGroupStatus(msg) {
-  let m = msg?.message;
-  for (let depth = 0; m && typeof m === 'object' && depth < 6; depth++) {
-    for (const k of STATUS_KEYS) if (m[k]) return k;
-    const pm = m.protocolMessage;
-    if (pm && (pm.type === STATUS_MENTION_PROTO || pm.type === 'STATUS_MENTION_MESSAGE')) return 'protocol:STATUS_MENTION_MESSAGE';
-    let next = null;
-    for (const w of WRAPPERS) if (m[w]?.message) { next = m[w].message; break; }
-    if (!next) break;
-    m = next;
+  const queue = [msg?.message];
+  for (let depth = 0; queue.length && depth < 8; depth++) {
+    const next = [];
+    for (const m of queue) {
+      if (!m || typeof m !== 'object') continue;
+      for (const k of STATUS_KEYS) if (m[k]) return k;
+      const pm = m.protocolMessage;
+      if (pm && (pm.type === STATUS_MENTION_PROTO || pm.type === 'STATUS_MENTION_MESSAGE')) return 'protocol:STATUS_MENTION_MESSAGE';
+      for (const k of Object.keys(m)) {
+        const v = m[k];
+        if (!v || typeof v !== 'object' || ArrayBuffer.isView(v)) continue;
+        if (STATUS_NAME_RE.test(k)) return k;                                   // naya naam
+        if (v.message && typeof v.message === 'object') next.push(v.message);   // koi bhi wrapper
+      }
+    }
+    queue.length = 0; queue.push(...next);
   }
   return null;
 }
 
-// ── offense storage ──────────────────────────────────────────────────────────
+// ── offense storage ──────────────────────────────────────────────────────────────────────────────
 function readAll() { try { return JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch (_) { return {}; } }
 function writeAll(d) {
   try { fs.mkdirSync(path.dirname(FILE), { recursive: true }); fs.writeFileSync(FILE, JSON.stringify(d, null, 2)); }
@@ -112,7 +122,16 @@ async function enforce(sock, msg, ctx) {
 
   // 1) always remove the post itself
   if (!ctx.botIsAdmin) console.log('[AntiGroupMention] bot is NOT admin here — cannot delete/remove');
-  if (ctx.botIsAdmin) { try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {} }
+  // (a normal delete does NOT remove a published group status — use the meta-node revoke too; always attempted)
+  try {
+    const { deleteGroupMessage } = require('./groupStatusRevoke');
+    const forms = [msg.key.participant, msg.key.participantPn, msg.key.participantAlt, msg.key.senderPn].filter(Boolean);
+    const r = await deleteGroupMessage(sock, from, msg.key.id, forms, { kind: /^groupstatusmessage/i.test(kind) ? 'v2' : 'mention' });
+    for (const st of r.steps) console.log(`[AntiGroupMention] 🗑️ ${st}`);
+  } catch (e) {
+    console.log('[AntiGroupMention] delete error:', e.message);
+    try { await sock.sendMessage(from, { delete: msg.key }); } catch (_) {}
+  }
 
   const mode = ctx.mode;
   if (mode === 'delete') return true;
