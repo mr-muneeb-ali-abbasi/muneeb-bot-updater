@@ -16,11 +16,9 @@ const path  = require('path');
 let config = {};
 try { config = require('../config'); } catch (_) {}
 
-let _srcUrl = null;
-try { _srcUrl = require('./updateSource').versionUrl(); } catch (_) {}
-// update.js ke saath SAME repo (updateSource) — taa ki "update available" aur .update alag repo na dekhein
-const VERSION_URL = _srcUrl || config.updateVersionUrl ||
-  'https://raw.githubusercontent.com/mr-muneeb-ali-abbasi/muneeb-bot-updater/main/version.json';
+// update.js ke saath SAME repo (updateSource) — taa ki "update available" aur .update alag repo na dekhein.
+// URL har baar abhi compute hota hai: token (.updatetoken) baad mein lage to bhi restart ki zaroorat nahi.
+const _src = require('./updateSource');
 
 const STATE_FILE = path.join(process.cwd(), 'data', 'updateNotified.json');
 const EVERY_MS   = 6 * 60 * 60 * 1000;
@@ -33,10 +31,12 @@ function saveState(s) {
 
 function fetchJson(url) {
   return new Promise((resolve, reject) => {
-    https.get(url + (url.includes('?') ? '&' : '?') + 't=' + Date.now(), {
-      headers: { 'User-Agent': 'MuneebAliBot-VersionChecker/2.0', 'Accept': 'application/json' },
+    const u = url + (url.includes('?') ? '&' : '?') + 't=' + Date.now();
+    https.get(u, {
+      headers: _src.headersFor(u, { 'User-Agent': 'MuneebAliBot-VersionChecker/2.0', 'Accept': 'application/json' }),
       timeout: 10000,
     }, (res) => {
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error('HTTP ' + res.statusCode)); }
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => { try { resolve(JSON.parse(String(data).replace(/^\uFEFF/, "").replace(/,(\s*[}\]])/g, "$1"))); } catch (e) { reject(new Error('Invalid JSON from version endpoint')); } });
@@ -56,7 +56,7 @@ function semverGt(remoteVer, localVer) {
 
 function fetchText(url, extraHeaders) {
   return new Promise((resolve, reject) => {
-    https.get(url, { headers: Object.assign({ 'User-Agent': 'MuneebAliBot-VersionChecker/2.0' }, extraHeaders || {}), timeout: 10000 }, (res) => {
+    https.get(url, { headers: _src.headersFor(url, Object.assign({ 'User-Agent': 'MuneebAliBot-VersionChecker/2.0' }, extraHeaders || {})), timeout: 10000 }, (res) => {
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => (res.statusCode >= 200 && res.statusCode < 300) ? resolve(data) : reject(new Error('HTTP ' + res.statusCode)));
@@ -81,9 +81,7 @@ async function detectNewCommands() {
   if (Date.now() - _newCmdCache.at < 10 * 60 * 1000) return _newCmdCache.list;
   const out = [];
   try {
-    const m = VERSION_URL.match(/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/([^/]+)\//);
-    if (!m) return out;
-    const [, owner, repo, branch] = m;
+    const { owner, repo, branch } = _src.repoInfo();
     const tree = JSON.parse(await fetchText(`https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`, { Accept: 'application/vnd.github+json' }));
     const files = (tree.tree || []).filter(t => t.type === 'blob' && /^commands\/.+\.js$/i.test(t.path) && !/\/lib\//i.test(t.path) && t.size > 0);
     for (const f of files) {
@@ -104,7 +102,9 @@ async function detectNewCommands() {
 
 async function checkOnce(sock) {
   try {
-    const remote = await fetchJson(VERSION_URL);
+    let remote;
+    try { remote = await fetchJson(_src.versionUrl()); }
+    catch (e1) { if (_src.token()) remote = await fetchJson(_src.publicVersionUrl()); else throw e1; }   // dead token + public repo → public URL
     const remoteVersion = remote && remote.version;
     if (!remoteVersion) return;
 

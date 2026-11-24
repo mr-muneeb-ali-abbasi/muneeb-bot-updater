@@ -102,11 +102,11 @@ function list(botId) {
     .map(cfg => ({ ...cfg }));
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════════════════
 //  GLOBAL channels (set by the main developer): every bot of the panel follows
 //  the channel and reacts to each new post with its OWN account, one reaction
 //  per post. A member can opt out for their own bot: `.channelreact optout`.
-// ═══════════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════════════════
 const fs   = require('fs');
 const path = require('path');
 const GLOBAL_FILE = path.join(__dirname, '..', 'data', 'channelReactGlobal.json');
@@ -137,7 +137,7 @@ function effective(botId, jid) {
   return effectiveList(botId).find(c => c.jid === key) || null;
 }
 
-// ── reacting ─────────────────────────────────────────────────────────────────
+// ── reacting ───────────────────────────────────────────────────────────────────────────────
 const _seen = new Map();   // `${botNum}:${jid}:${serverId}` → ts
 const botNum = (sock) => String(sock?.user?.id || '').split(':')[0].split('@')[0];
 
@@ -206,12 +206,11 @@ function startSync(sock) {
           await sleep(1000 + Math.random() * 3000);
         }
         if (typeof sock.newsletterFetchMessages !== 'function') continue;
-        let res; 
-        try { res = await sock.newsletterFetchMessages(ch.jid, 5); } catch (_) { res = null; }
-        let arr = items(res);
-        if (!arr.length) { try { arr = items(await sock.newsletterFetchMessages('jid', ch.jid, 5)); } catch (_) {} }
-        if (!arr.length) continue;
-        const ids = arr.map(sidOf).filter(v => v != null).map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+        let res;
+        try { res = await sock.newsletterFetchMessages(ch.jid, 5); }
+        catch (e) { console.warn(`[channelreact] fetch posts failed for ${ch.name}: ${e.message}`); res = null; }
+        // rc.14 returns a raw binary node, older versions an array — serverIdsFrom() understands both
+        const ids = require('./newsletterMeta').serverIdsFrom(res);
         if (!ids.length) continue;
         const top = ids[ids.length - 1];
         if (!baseline.has(ch.jid)) { baseline.set(ch.jid, top); continue; }   // first look: remember, never react to old posts

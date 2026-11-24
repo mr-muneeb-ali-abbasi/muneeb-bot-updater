@@ -27,7 +27,7 @@ const path = require('path');
 
 const FILE = path.join(__dirname, '..', 'data', 'antiGroupMentionStatus.json');
 
-// ── detection ────────────────────────────────────────────────────────────────
+// ── detection ────────────────────────────────────────────────────────────────────────────────
 const KEY_RE = /^(groupstatus(mention)?|statusmention)message(v\d+)?$|^groupmentionedmessage$/i;
 const WRAPPERS = ['ephemeralMessage', 'viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension',
   'documentWithCaptionMessage', 'editedMessage', 'deviceSentMessage'];
@@ -78,7 +78,7 @@ function noteUnknown(msg) {
   } catch (_) {}
 }
 
-// ── warning storage ──────────────────────────────────────────────────────────
+// ── warning storage ──────────────────────────────────────────────────────────────────────────
 const digits = (v) => String(v || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
 function readAll() { try { return JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch (_) { return {}; } }
 function writeAll(d) {
@@ -97,11 +97,11 @@ function setCount(group, ids, n) {
 function resetGroup(group) { const all = readAll(); delete all[group]; writeAll(all); }
 function resetUser(group, ids) { setCount(group, ids, 0); }
 
-// ── helpers ──────────────────────────────────────────────────────────────────
+// ── helpers ────────────────────────────────────────────────────────────────────────────
 function ownBotAccounts() {
   const out = new Set();
   try {
-    const sm = require('../panel/sessionManager');
+    const sm = require('../Panel/sessionManager');
     for (const s of sm.sessions.values()) {
       const u = s?.sock?.user;
       for (const v of [u?.id, u?.lid]) { const d = digits(v); if (d) out.add(d); }
@@ -116,9 +116,27 @@ function senderJids(msg) {
   return [...new Set([k.participant, k.participantPn, k.participantAlt, k.senderPn].filter(Boolean))];
 }
 
-/** Delete the post. Tries each sender-JID form until one request goes through. */
-async function deletePost(sock, msg, from) {
+/** Is this a PUBLISHED group-status post (needs the special admin revoke) or just a "mentioned this group" notice? */
+const isPublishedStatusKind = (kind) => /^groupstatusmessage/i.test(String(kind || ''));
+
+/**
+ * Delete the post.
+ * A published group status (groupStatusMessageV2) is NOT removed by a normal delete — WhatsApp ignores it unless the revoke
+ * carries the <meta is_group_status="true"/> node (utils/groupStatusRevoke.js, same method as the .delete command).
+ * Before this fix the bot only sent the normal delete, so it kicked the user but left the status/link standing.
+ * For plain messages / mention notices the normal delete is the right path and is still sent.
+ */
+async function deletePost(sock, msg, from, kind) {
   const forms = senderJids(msg);
+  try {
+    const { deleteGroupMessage } = require('./groupStatusRevoke');
+    const r = await deleteGroupMessage(sock, from, msg.key.id, forms, { kind: isPublishedStatusKind(kind) ? 'v2' : 'mention' });
+    for (const st of r.steps) console.log(`[AntiGMS] 🗑️ ${st}`);
+    if (r.ok) return true;
+    console.log(`[AntiGMS] ❌ revoke helper could not delete (${r.lastErr ? r.lastErr.message : 'unknown'}) — trying plain delete`);
+  } catch (e) {
+    console.log(`[AntiGMS] revoke helper error: ${e.message} — trying plain delete`);
+  }
   if (!forms.length) forms.push(undefined);
   let lastErr = null;
   for (const p of forms) {
@@ -126,7 +144,7 @@ async function deletePost(sock, msg, from) {
       const key = { remoteJid: from, id: msg.key.id, fromMe: false };
       if (p) key.participant = p;
       await sock.sendMessage(from, { delete: key });
-      console.log(`[AntiGMS] 🗑️ delete request sent (participant=${p ? String(p).split('@')[0] : '-'})`);
+      console.log(`[AntiGMS] 🗑️ plain delete sent (participant=${p ? String(p).split('@')[0] : '-'})`);
       return true;
     } catch (e) {
       lastErr = e;
@@ -197,7 +215,7 @@ async function enforce(sock, msg, ctx) {
   console.log(`[AntiGMS] ${kind} by ${ids[0]} in ${from.split('@')[0]} (mode=${mode}, limit=${limit}, botAdmin=${ctx.botIsAdmin})`);
 
   // 1) delete — ALWAYS attempted, whatever the cached admin flag says
-  const deleted = await deletePost(sock, msg, from);
+  const deleted = await deletePost(sock, msg, from, kind);
 
   // bot not admin? one live re-check (cached "false" may be stale) — used only for wording / removal
   let botIsAdmin = !!ctx.botIsAdmin;
@@ -244,4 +262,4 @@ async function enforce(sock, msg, ctx) {
   return true;
 }
 
-module.exports = { detect, noteUnknown, enforce, resetGroup, resetUser, getCount };
+module.exports = { detect, noteUnknown, enforce, resetGroup, resetUser, getCount, _deletePost: deletePost };
