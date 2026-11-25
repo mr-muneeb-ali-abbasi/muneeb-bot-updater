@@ -43,20 +43,11 @@ function cleanEmoji(value) {
 
 async function resolveChannel(sock, input) {
   const raw = String(input || '').trim();
-  if (NEWSLETTER_JID_RE.test(raw)) {
-    return { jid: raw, name: raw };
-  }
-
-  const match = raw.match(CHANNEL_LINK_RE);
-  if (!match) throw new Error('Valid WhatsApp Channel link ya newsletter JID dein.');
-  if (typeof sock.newsletterMetadata !== 'function') {
-    throw new Error('Is Baileys connection mein channel metadata support available nahi hai.');
-  }
-
-  const metadata = await sock.newsletterMetadata('invite', match[1]);
-  const jid = normalizeJid(metadata?.id);
+  if (NEWSLETTER_JID_RE.test(raw)) return { jid: raw, name: raw };
+  const meta = await require('../../utils/newsletterMeta').fetchChannelMeta(sock, raw);   // understands rc.9 and rc.14 shapes
+  const jid = normalizeJid(meta.id);
   if (!jid) throw new Error('Channel link resolve nahi hua ya channel unavailable hai.');
-  return { jid, name: metadata?.name || metadata?.subject || jid };
+  return { jid, name: meta.name || jid };
 }
 
 module.exports = {

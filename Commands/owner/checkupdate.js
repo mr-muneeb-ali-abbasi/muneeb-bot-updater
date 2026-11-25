@@ -3,17 +3,14 @@
 const https  = require('https');
 const config = require('../../config');
 
-// .update ke saath SAME repo (utils/updateSource.js)
-let _srcUrl = null;
-try { _srcUrl = require('../../utils/updateSource').versionUrl(); } catch (_) {}
-const VERSION_URL = _srcUrl || config.updateVersionUrl ||
-  'https://raw.githubusercontent.com/mr-muneeb-ali-abbasi/muneeb-bot-updater/main/version.json';
+// .update ke saath SAME repo (utils/updateSource.js) — URL har baar abhi compute hota hai (token baad mein bhi lag sakta hai)
+const _src = require('../../utils/updateSource');
 
 function fetchJson(url) {
   return new Promise((resolve, reject) => {
     const u = url + (url.includes('?') ? '&' : '?') + 't=' + Date.now();   // GitHub raw cache todne ke liye
     const req = https.get(u, {
-      headers: { 'User-Agent': 'MuneebAliBot/2.0', 'Accept': 'application/json', 'Cache-Control': 'no-cache' },
+      headers: _src.headersFor(u, { 'User-Agent': 'MuneebAliBot/2.0', 'Accept': 'application/json', 'Cache-Control': 'no-cache' }),
       timeout: 10_000,
     }, res => {
       if (res.statusCode !== 200) { res.resume(); return reject(new Error(`HTTP ${res.statusCode} from GitHub`)); }
@@ -67,7 +64,13 @@ module.exports = {
       } catch (_) {}
 
       await editStatus('📡 *Fetching remote version from GitHub…*');
-      const remote     = await fetchJson(VERSION_URL);
+      let remote;
+      try { remote = await fetchJson(_src.versionUrl()); }
+      catch (e1) {
+        // token set but dead while the repo is still public → public URL
+        if (_src.token()) { try { remote = await fetchJson(_src.publicVersionUrl()); } catch (_) { throw e1; } }
+        else throw e1;
+      }
       const remoteVer  = remote?.version  || 'unknown';
       const remoteDate = remote?.releaseDate || remote?.date || null;
       const changelog  = remote?.changelog || remote?.changes || null;
@@ -103,11 +106,8 @@ module.exports = {
       }
 
       text +=
-        `┃ 🔗 Repo: mr-muneeb-ali-abbasi/\n` +
-        `┃         muneeb-bot-updater\n` +
-        `┃\n` +
         `╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n` +
-        `> *ᴘᴏᴡᴇʀᴇᴅ ʙʏ ${config.botName || 'Bot'}*`;
+        `> *ᴘᴏᴡᴇʀᴇᴅ  ʙʏ ${config.botName || 'Bot'}*`;
 
       await editStatus(text);
 
@@ -115,7 +115,7 @@ module.exports = {
       console.error('[checkupdate]', err.message);
       await editStatus(
         `❌ *Version check failed!*\n\n` +
-        `Error: ${err.message}\n\n` +
+        `Error: ${_src.scrub(err.message)}${_src.explain(err)}\n\n` +
         `_Internet connection ya GitHub access check karo._`
       );
     }
