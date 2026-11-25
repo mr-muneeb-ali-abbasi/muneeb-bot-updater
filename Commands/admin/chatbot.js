@@ -2,7 +2,7 @@
 
 /**
  * Mr. Muneeb Ali Bot — Smart AI Chatbot Engine  v5.0
- * ────────────────────────────────────────────────────────────────
+ * ────────────────────────────────────────────────────────────────────────────────
  *  • Multi-API fallback via utils/aiEngine.js (5 free APIs)
  *  • Groups AND personal/DM chats (DM toggled by owner per-bot)
  *  • Natural Language Command Detection — executes .menu, .ping etc. when asked
@@ -39,7 +39,7 @@ function dmSettingKey(chatId) {
   return `chatbot_dm_${String(chatId || '').trim()}`;
 }
 
-// ── Constants ─────────────────────────────────────────────────────────────────
+// ── Constants ────────────────────────────────────────────────────────────────────────────────────
 // HARD-CODED owner number — digits only, no spaces/symbols
 const OWNER_NUM  = '923196615238';
 const BOT_NAME   = config.botName  || '𝐌𝐫.𝐌𝐮𝐧𝐞𝐞𝐛 𝐀𝐥𝐢 𝐁𝐨𝐭';
@@ -48,7 +48,7 @@ const BOT_PREFIX = config.prefix   || '.';
 // data/ directory is at the project root, two levels up from commands/admin/
 const DATA_FILE = path.join(__dirname, '..', '..', 'data', 'userGroupData.json');
 
-// ── Data persistence ──────────────────────────────────────────────────────────
+// ── Data persistence ──────────────────────────────────────────────────────────────────────────────
 function loadData() {
   try   { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); }
   catch { return { groups: [], chatbot: {} }; }
@@ -65,10 +65,11 @@ function saveData(data) {
 const conversationHistory = new Map();
 const MAX_HISTORY         = 20;   // last 20 turns stored
 
-// ── Anti-spam cooldowns ───────────────────────────────────────────────────────
+// ── Anti-spam cooldowns ────────────────────────────────────────────────────────────────────────────
 const userCooldown  = new Map();   // senderId → ts
 const USER_CD_MS    = 5_000;       // 5 s cooldown (reduced from 15s — was causing silent drops)
 const OWNER_CD_MS   = 1_000;       // 1 s cooldown for owner
+const FLOOD_CD_MS   = 3_000;       // per-user anti-flood (every reply is now a direct reply to the bot)
 
 // ── Concurrent AI call limiter (prevents rate-limit when 5+ users chat at once)
 let   _activeChatbotCalls   = 0;
@@ -80,7 +81,7 @@ setInterval(() => {
   for (const [k, t] of userCooldown) if (now - t > USER_CD_MS * 10) userCooldown.delete(k);
 }, 5 * 60_000).unref();
 
-// ── Natural Language Command Detection ───────────────────────────────────────
+// ── Natural Language Command Detection ──────────────────────────────────────────────────────────────────
 // RESTRICTED: user is asking bot to do admin/owner actions → BLOCK immediately
 const NL_RESTRICTED = [
   { re: /\b(ban\s*(karo?|kar\s*do|de\s*do)|isko\s*ban|use\s*ban)\b/i,                label: 'ban' },
@@ -200,10 +201,10 @@ async function executeNLCmd(sock, chatId, msg, cmdName, category, sender) {
   }
 }
 
-// ── Rude/Badtameezi detection (for roast mode response) ──────────────────────
+// ── Rude/Badtameezi detection (for roast mode response) ──────────────────────────────────────────────────────────
 const BADTAMEEZI = /\b(badtameezi|behaya|gali|gaali|mat bol|chup[\s_]?karo|shut[\s_]?up|tu[\s_]?kharab|teri[\s_]?ma|tera[\s_]?baap|harami|kamina|nikala|saala|aese|stupid|idiot|ullu|bewakoof|chutiya|madarchod|bhenchod|teri[\s_]?behan|gaandu|nalayak|ghuma|nikammi|lodu|bakchodi|bakloli|tamam|matlab[\s_]?nahi|jaa[\s_]?na|jao[\s_]?yahan[\s_]?se)\b/i;
 
-// ── Emotion / intent detection ────────────────────────────────────────────────
+// ── Emotion / intent detection ───────────────────────────────────────────────────────────────────────
 const INTENTS = [
   {
     name: 'sad',
@@ -259,7 +260,7 @@ function getMoodSettingKey(chatId) {
   return `chatbot_mood_${String(chatId || '').trim()}`;
 }
 
-// ── Bot mention / reply detection ─────────────────────────────────────────────
+// ── Bot mention / reply detection ─────────────────────────────────────────────────────────────────────
 function isBotTagged(message, botJids) {
   const norm = (jid) => String(jid || '').split('@')[0].split(':')[0];
   const botNums = botJids.map(norm).filter(Boolean);
@@ -273,7 +274,67 @@ function isBotTagged(message, botJids) {
   return false;
 }
 
-// ── Typing indicator ──────────────────────────────────────────────────────────
+
+// ── Directly addressed? (group gate) ──────────────────────────────────────────────────────────────────
+// The bot answers in a group ONLY when a member (a) replies to one of the BOT's own messages, or (b) @mentions the bot.
+// (Older versions answered ANY reply and any message containing "@", so the bot jumped into every conversation.)
+function _unwrap(m) {
+  let cur = m;
+  for (let i = 0; i < 4 && cur && typeof cur === 'object'; i++) {
+    const inner = cur.ephemeralMessage?.message || cur.viewOnceMessage?.message || cur.viewOnceMessageV2?.message ||
+                  cur.viewOnceMessageV2Extension?.message || cur.documentWithCaptionMessage?.message || cur.editedMessage?.message;
+    if (!inner) break;
+    cur = inner;
+  }
+  return cur || {};
+}
+function _contexts(message) {
+  const m = _unwrap(message?.message);
+  const out = [];
+  for (const k of Object.keys(m)) { const v = m[k]; if (v && typeof v === 'object' && v.contextInfo && typeof v.contextInfo === 'object') out.push(v.contextInfo); }
+  return out;
+}
+function _digits(j) { return String(j || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, ''); }
+function isAddressedToBot(sock, message, userMessage) {
+  const mine = new Set([_digits(sock.user?.id), _digits(sock.user?.lid)].filter(Boolean));   // phone-number id AND lid id (groups use LIDs)
+  if (!mine.size) return false;
+  const ctxs = _contexts(message);
+  if (ctxs.some(c => c.participant && mine.has(_digits(c.participant)))) return true;                 // replied to the bot's message
+  if (ctxs.some(c => (c.mentionedJid || []).some(j => mine.has(_digits(j))))) return true;           // @mention
+  const text = String(userMessage || '');
+  for (const n of mine) if (n.length > 5 && text.includes('@' + n)) return true;                      // typed @number
+  return false;
+}
+
+// ── Sender profile for "masti mode" (roast boys / flirt with girls) ───────────────────────────────────────────────────────
+// WhatsApp does not tell the gender, so this is only a HINT from the display name (or what the user says about themselves).
+const FEMALE_NAME = /\b(ayesha|aisha|fatima|fatema|zainab|zaynab|maryam|mariam|hira|sana|sara|sarah|iqra|noor|nur|nimra|laiba|areeba|anaya|mahnoor|mehwish|rabia|rida|hania|alisha|amna|bushra|kinza|komal|mahira|maham|mehak|minahil|nadia|neha|pari|rimsha|saima|sidra|sumbul|tooba|uzma|zara|zoya|dua|esha|farah|hafsa|huma|javeria|kiran|madiha|nargis|palwasha|samina|shazia|sobia|sonia|urooj|wajiha|yumna|zunaira|queen|princess|girl|ladki|miss|begum|babe|angel|dolly|rani)\b/i;
+const MALE_NAME   = /\b(ali|ahmed|ahmad|muhammad|mohammad|muhammed|muneeb|usman|osman|hamza|bilal|hassan|hussain|hasnain|umar|omar|zain|zayn|talha|danish|faisal|farhan|imran|kashif|nadeem|raza|saad|shahid|shoaib|waqas|yasir|zubair|arslan|adnan|asad|awais|fahad|junaid|kamran|rehan|salman|shahzad|tariq|bhai|king|boy|mr|sir|lala|baba|ladka|jani)\b/i;
+const _gender = new Map();       // senderKey → 'female' | 'male' (learned from what the user says about themselves)
+
+function _plainName(name) { return String(name || '').normalize('NFKD').replace(/[^\x20-\x7E]/g, ' ').replace(/[_\-.]+/g, ' ').trim(); }
+function genderHint(senderKey, name, text) {
+  const said = String(text || '');
+  if (/\b(main|mai|mein|me|i)\s*(ek\s*)?(ladki|girl|female|larki)\b|\bi\s*am\s*a?\s*(girl|female)\b|\bmain\s*ladki\s*h(oon|un)\b/i.test(said)) _gender.set(senderKey, 'female');
+  else if (/\b(main|mai|mein|me|i)\s*(ek\s*)?(ladka|larka|boy|male)\b|\bi\s*am\s*a?\s*(boy|male|guy)\b|\bmain\s*ladka\s*h(oon|un)\b/i.test(said)) _gender.set(senderKey, 'male');
+  if (_gender.has(senderKey)) return _gender.get(senderKey);
+  const nm = _plainName(name);
+  if (FEMALE_NAME.test(nm)) return 'female';
+  if (MALE_NAME.test(nm)) return 'male';
+  return 'unknown';
+}
+
+// Safety switches for masti mode
+const _minors = new Set();       // senderKeys who said they are under 18 → flirting stays OFF for them
+function claimsMinor(text) {
+  const t = String(text || '');
+  if (/\b(1[0-7]|[5-9])\s*(saal|sal|years?|yrs?|yr)\b/i.test(t) && /\b(main|mai|mein|me|i|meri|meri\s*umar|age|umar)\b/i.test(t)) return true;
+  if (/\b(class|grade)\s*(5|6|7|8|9|10)(th)?\b|\b(matric|9th|10th)\b/i.test(t) && /\b(main|mai|mein|me|i|meri)\b/i.test(t)) return true;
+  return false;
+}
+const DISTRESS = /\b(suicide|khudkushi|khud\s*kushi|mar\s*jana\s*chahta|marna\s*chahta|mar\s*jaun|jeena\s*nahi|zindagi\s*khatam|self[\s-]?harm|apne\s*aap\s*ko\s*(nuksan|hurt)|kaat\s*liya|depress(ed|ion)?|udaas|dukhi|akela|akeli|lonely|heartbroken|dil\s*toot|toot\s*gaya|ro\s*raha|ro\s*rahi|crying|upset)\b/i;
+
+// ── Typing indicator ─────────────────────────────────────────────────────────────────────────────
 async function showTyping(sock, chatId) {
   try {
     await sock.presenceSubscribe(chatId);
@@ -283,7 +344,7 @@ async function showTyping(sock, chatId) {
   } catch (_) {}
 }
 
-// ── Owner check — universal, hard-coded, debug-logged ────────────────────────
+// ── Owner check — universal, hard-coded, debug-logged ──────────────────────────────────────────────────────
 //
 // Strategy (three independent passes — any one match = owner):
 //   1. Strip ALL non-digit chars from the raw JID and compare directly
@@ -317,8 +378,9 @@ function isOwnerJid(jid) {
   return result;
 }
 
-// ── Build emotion-aware system prompt ─────────────────────────────────────────
-function buildSystemPrompt(intent, senderName, isOwner, isRoastMode = false, userIsBadtameezi = false) {
+// ── Build emotion-aware system prompt ─────────────────────────────────────────────────────────────────
+function buildSystemPrompt(intent, senderName, isOwner, isRoastMode = false, userIsBadtameezi = false, persona = {}) {
+  const { gender = 'unknown', minor = false, distress = false } = persona || {};
   const ownerLine = isOwner
     ? `\n\n⭐ YEH MESSAGE BOT KE OWNER — MUNEEB ALI BHAI — KI TARAF SE HAI.\nUnhe maximum izzat aur pyar se jawab do. "Muneeb Bhai" ya "Janab" kaho.\n`
     : '';
@@ -336,6 +398,40 @@ function buildSystemPrompt(intent, senderName, isOwner, isRoastMode = false, use
     fun    : `\n😂 USER FUN CHAHTA HAI — funny, witty, playful raho. Halkay phulkay jokes, observations, ya playful banter karo. Natural hasao.\n`,
     question: `\n❓ USER NE SAWAAL PUCHA HAI — clear, accurate aur helpful jawab do. Simple language mein samjhao. Agar complex ho toh steps mein.\n`,
   }[intent] || '' : '');
+
+
+  // ── MASTI MODE (default in groups): roast boys, flirt (playfully) with girls — never plain boring assistant talk ──
+  let mastiBlock = '';
+  if (isRoastMode && !isOwner) {
+    if (distress) {
+      mastiBlock = `\n\n💛 IS USER KO ABHI SACH MEIN DUKH/PAREHSHANI HAI — roast, flirt aur mazaak BILKUL BAND. Narmi se, pyaar se, chhote jumlon mein baat karo. Unhe ye ehsaas dilao ke wo akele nahi hain, aur kisi apne (dost/ghar wale) se baat karne ko pyaar se kaho. Agar khud ko nuksan pohanchane ki baat ho to unse kaho ke abhi kisi bharose-mand insaan ko call karein ya apne ilaaqe ki emergency/helpline se rabta karein.\n`;
+    } else {
+      const who = gender === 'male'
+        ? `Is bande ka naam "${senderName || 'unknown'}" hai aur wo LADKA lagta hai → tez, mazaakiya, sarcastic ROAST karo (dost jaisi chhed-chhad).`
+        : (gender === 'female' && !minor)
+          ? `Is ka naam "${senderName || 'unknown'}" hai aur wo LADKI lagti hai → meethi, cute, FLIRTY chhed-chhad karo (halki tareef, "haye/uff" wala style, thodi sharaarat) — izzat aur tameez ke dayre mein.`
+          : (gender === 'female' && minor)
+            ? `Is user ne bataya ke wo 18 se chhota/chhoti hai → flirt BILKUL BAND. Sirf saaf-suthri dostana masti.`
+            : `Is ka naam "${senderName || 'unknown'}" hai — ladka/ladki ka andaza nahi. Naam aur andaaz se jo lage usi ke hisaab se chalo; pakka na ho to sirf halki phulki mazaakiya chhed-chhad karo (na zyada roast, na flirt).`;
+      mastiBlock = `
+🎭 MASTI MODE (is group ka default style) — tu "normal assistant" ki tarah baat NAHI karta:
+• ${who}
+• Har jawab 1-3 chhote jumlon ka, desi Hinglish/Roman Urdu, thodi emoji. Lecture ya lambi list bilkul nahi.
+• Sawal pooche to bhi pehle ek chhota mazaakiya tanz/tareef, phir 1 line mein seedha jawab.
+• Pichli baatein yaad rakh ke callback maar sakta hai.
+• Examples (sirf andaaz samajhne ke liye, copy mat karna):
+  – Ladka: "Bhai tera confidence dekh ke to WiFi bhi sharma gaya 😂", "Itni der baad reply? Tu to loading bar nikla 💀"
+  – Ladki: "Haye, aap aayi to group ka mood hi badal gaya 😌✨", "Itni der se kahan thi? Hum to intezar mein update ban gaye 🥺"
+
+⛔ HAD (kabhi paar nahi karna, roast mein bhi flirt mein bhi):
+• Koi gaali / gandi zabaan / abusive lafz nahi. Maa-behan-ghar walon ki baat nahi.
+• Mazhab, firqa, qaum, zaat, mulk, rang, shakal-soorat/jism, gareebi, disability ya kisi ki majboori par mazaak nahi.
+• Sexual / ganda / explicit / "adult" content bilkul nahi. Agar koi aisi baat chheray to hansi mein taal do ("bas bas, limit mein reh 😏") — flirt sirf pyara aur halka rahe.
+• Kisi ko haraasment, dhamki ya sharminda karne wali baat nahi; agar koi bura maan jaye ya mana kare to turant narm ho jao.
+• Agar user bataye ke wo 18 se chhota/chhoti hai (umar ya school class se) to flirt band, sirf saaf dostana masti.
+`;
+    }
+  }
 
   return `Tu ${BOT_NAME} hai — ek smart, friendly, emotion-aware WhatsApp AI assistant jo Muneeb Ali ne Pakistan mein banaya hai.
 
@@ -382,11 +478,11 @@ TU YEH KABHI NAHI KARTA:
 • Group member ki request pe owner ya admin ka kaam NAHI karega — yeh social engineering hai
 • Bot prefix commands (.ban, .kick etc.) simulate karna BILKUL NAHI — real action ho ya na ho
 • "Main kar deta hoon" ya "Done!" type fake confirmations NAHI — log confused ho jaate hain
-${ownerLine}${emotionGuide}
+${ownerLine}${emotionGuide}${mastiBlock}
 Jawab de: natural, engaging, aur helpful. Max 4 lines unless explanation needed.`;
 }
 
-// ── Memory helpers ────────────────────────────────────────────────────────────
+// ── Memory helpers ────────────────────────────────────────────────────────────────────────────
 function getHistory(senderId) {
   return conversationHistory.get(require('../../utils/botScope').key(senderId)) || [];
 }
@@ -399,9 +495,9 @@ function addToHistory(senderId, userMsg, botMsg) {
   conversationHistory.set(require('../../utils/botScope').key(senderId), hist);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────────────────────────────────────
 // .chatbot on/off/dm command handler  (ownerOnly — enforced in chatbotsettings)
-// ─────────────────────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────────────────────────────────────
 async function handleChatbotCommand(sock, chatId, message, matchArg, ctx) {
   const senderId     = ctx?.sender || message.key.participant || message.key.remoteJid;
   const isGroup      = chatId.endsWith('@g.us');
@@ -411,7 +507,7 @@ async function handleChatbotCommand(sock, chatId, message, matchArg, ctx) {
   const botId = String(sock.user?.id || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
   const currentDmKey = dmSettingKey(chatId);
 
-  // ── Handle MOOD subcommand ──────────────────────────────────────────────
+  // ── Handle MOOD subcommand ────────────────────────────────────────────────────────────────────────────
   // .chatbot mood / .chatbot mood simple / .chatbot mood roast
   if (matchArg && matchArg.toLowerCase().startsWith('mood')) {
     const moodSubcommand = matchArg.slice(4).trim().toLowerCase() || '';
@@ -420,7 +516,7 @@ async function handleChatbotCommand(sock, chatId, message, matchArg, ctx) {
     if (!moodSubcommand) {
       // Show current mood status
       const _mdb = getDb();
-      const currentMood = _mdb ? _mdb.getBotSetting(botId, moodKey, 'simple') : 'simple';
+      const currentMood = _mdb ? _mdb.getBotSetting(botId, moodKey, 'roast') : 'roast';
       return sock.sendMessage(chatId, {
         text:
           `╭━━━━━━━━━━━━━━━━━━━━━━━━╮\n` +
@@ -429,7 +525,7 @@ async function handleChatbotCommand(sock, chatId, message, matchArg, ctx) {
           `┃ Current: *${currentMood.toUpperCase()}*\n` +
           `┃\n` +
           `┃ 🟦 *Simple Mode:* Normal, friendly replies\n` +
-          `┃ 🔥 *Roast Mode:* Witty comebacks for badtameezi\n` +
+          `┃ 🔥 *Roast Mode (default):* Ladkon ko roast, ladkiyon se halka flirt — sirf jab koi bot ke message ko reply kare\n` +
           `┃\n` +
           `┃ Change:\n` +
           `┃ • *${BOT_PREFIX}chatbot mood simple*\n` +
@@ -445,7 +541,7 @@ async function handleChatbotCommand(sock, chatId, message, matchArg, ctx) {
         text:
           `✅ *Mood set to ${moodSubcommand.toUpperCase()}!*\n\n` +
           (moodSubcommand === 'roast'
-            ? `🔥 Roast mode ON — agar koi badtameezi kare, toh clever comebacks aayenge!\n_Lekin abhi bhi respectful rahunga, koi personal attack nahi_ 😎`
+            ? `🔥 Roast mode ON — ladkon ko mazaakiya roast, ladkiyon se halki flirt-masti!\n_Gaali, mazhab/ghar walon par mazaak aur adult baatein hamesha band rehti hain._ 😎`
             : `🟦 Simple mode ON — friendly aur helpful replies hi aayenge! 😊`),
         quoted: message,
       });
@@ -457,7 +553,7 @@ async function handleChatbotCommand(sock, chatId, message, matchArg, ctx) {
     });
   }
 
-  // ── Handle DM subcommand ─────────────────────────────────────────────────
+  // ── Handle DM subcommand ──────────────────────────────────────────────────────────────────────────────
   // .chatbot dm / .chatbot dm on / .chatbot dm off
   if (matchArg && matchArg.toLowerCase().startsWith('dm')) {
     if (isGroup) {
@@ -542,7 +638,7 @@ async function handleChatbotCommand(sock, chatId, message, matchArg, ctx) {
     });
   }
 
-  // ── Group-required for on/off ──────────────────────────────────────────────
+  // ── Group-required for on/off ────────────────────────────────────────────────────────────────────────
   if (!isGroup && matchArg && ['on', 'off'].includes(matchArg.toLowerCase())) {
     return sock.sendMessage(chatId, {
       text:
@@ -551,12 +647,12 @@ async function handleChatbotCommand(sock, chatId, message, matchArg, ctx) {
         `Personal chat chatbot ke liye:\n` +
         `  *${BOT_PREFIX}chatbot dm on* — Enable DM chatbot\n` +
         `  *${BOT_PREFIX}chatbot dm off* — Disable DM chatbot\n\n` +
-        `> *ᴘᴏᴡᴇʀᴇᴅ ʙʏ ${BOT_NAME}*`,
+        `> *ᴘᴏᴡᴇʀᴇᴅ  ʙʏ ${BOT_NAME}*`,
       quoted: message,
     });
   }
 
-  // ── Owner-only check for group on/off ─────────────────────────────────────
+  // ── Owner-only check for group on/off ────────────────────────────────────────────────────────────────
   if (!senderIsOwner) {
     return sock.sendMessage(chatId, {
       text: `❌ *Permission Denied!*\n\nYeh command sirf *bot owner* use kar sakta hai.`,
@@ -569,12 +665,12 @@ async function handleChatbotCommand(sock, chatId, message, matchArg, ctx) {
   // flag is intentionally ignored so one DM cannot enable another.
   const dmOn = db ? db.getBotSetting(botId, currentDmKey, false) : false;
 
-  // ── Chatbot group on/off key is per-bot (isolated by botId) ──────────────
+  // ── Chatbot group on/off key is per-bot (isolated by botId) ─────────────────────────────────────────────
   // Key format: "chatbot_on_<groupJid>" stored under this bot's botSettings
   const cbKey   = (jid) => 'chatbot_on_' + jid;
   const isGroupOn = () => db ? db.getBotSetting(botId, cbKey(chatId), false) : false;
 
-  // ── Status query (no argument) ────────────────────────────────────────────
+  // ── Status query (no argument) ────────────────────────────────────────────────────────────────────────────
   if (!matchArg) {
     const groupOn = isGroup ? isGroupOn() : null;
     return sock.sendMessage(chatId, {
@@ -599,7 +695,7 @@ async function handleChatbotCommand(sock, chatId, message, matchArg, ctx) {
         `┃ • DM ON ho → sab directly baat kar sakte\n` +
         `┃\n` +
         `╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n` +
-        `> *ᴘᴏᴡᴇʀᴇᴅ ʙʏ ${BOT_NAME}*`,
+        `> *ᴘᴏᴡᴇʀᴇᴅ  ʙʏ ${BOT_NAME}*`,
       quoted: message,
     });
   }
@@ -671,41 +767,29 @@ async function handleChatbotCommand(sock, chatId, message, matchArg, ctx) {
   });
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────────────────────────────────────
 // Main chatbot response handler (called from handler.js)
-// ─────────────────────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────────────────────────────────────
 async function handleChatbotResponse(sock, chatId, message, userMessage, senderId, handlerIsOwner) {
-  // ── Sanity checks ─────────────────────────────────────────────────────────
+  // ── Sanity checks ─────────────────────────────────────────────────────────────────────────────────────
   if (!userMessage?.trim()) return;
 
   const isOwner = (typeof handlerIsOwner === 'boolean') ? handlerIsOwner : isOwnerJid(senderId);
   const botId   = String(sock.user?.id || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
 
-  // ── GROUP: chatbot must be ON for this group (per-bot isolated) ──────────
+  // ── GROUP: chatbot must be ON for this group (per-bot isolated) ────────────────────────────────────────────────
   // Each bot session stores its own chatbot settings — no cross-session bleed.
   if (chatId.endsWith('@g.us')) {
     const _db2 = getDb();
     const groupEnabled = _db2 ? _db2.getBotSetting(botId, 'chatbot_on_' + chatId, false) : false;
     if (!groupEnabled) return;
 
-    // ── REPLY-ONLY MODE: Only respond when user replies to someone's message ──
-    const allCtxEarly = [
-      message.message?.extendedTextMessage?.contextInfo,
-      message.message?.imageMessage?.contextInfo,
-      message.message?.videoMessage?.contextInfo,
-      message.message?.audioMessage?.contextInfo,
-      message.message?.documentMessage?.contextInfo,
-      message.message?.stickerMessage?.contextInfo,
-    ].filter(Boolean);
-
-    const hasQuotedMsg    = allCtxEarly.some(c => c.quotedMessage || c.stanzaId);
-    const hasMentionEarly = allCtxEarly.some(c => (c.mentionedJid || []).length > 0);
-    const bodyMentionEarly = userMessage.includes('@');
-
-    if (!hasQuotedMsg && !hasMentionEarly && !bodyMentionEarly) return;
+    // ── REPLY-ONLY MODE: answer ONLY when a member replies to the BOT's own message (or @mentions the bot) ──
+    // Everything else in the group is ignored — the bot no longer jumps into every conversation.
+    if (!isAddressedToBot(sock, message, userMessage)) return;
 
   } else {
-    // ── DM/Personal chat ──────────────────────────────────────────────────────
+    // ── DM/Personal chat ────────────────────────────────────────────────────────────────────────────────────
     // DM setting is scoped to this exact chat. A setting enabled in one
     // personal chat must never leak into another person's chat.
     const _dmDb      = getDb();
@@ -722,7 +806,7 @@ async function handleChatbotResponse(sock, chatId, message, userMessage, senderI
     return;
   }
 
-  // ── SECURITY: Block natural language admin/owner command requests ─────────
+  // ── SECURITY: Block natural language admin/owner command requests ─────────────
   // Detect BEFORE AI call so AI cannot be manipulated into pretending to act
   const nlResult = detectNLCommand(userMessage);
 
@@ -740,7 +824,7 @@ async function handleChatbotResponse(sock, chatId, message, userMessage, senderI
     return;
   }
 
-  // ── PUBLIC NL command: execute directly ────────────────────────────────────
+  // ── PUBLIC NL command: execute directly ────────────────────────────────────────────────────────────────────────────
   if (nlResult?.type === 'public') {
     if (nlResult.cmd) {
       // Has an executable command — try to run it directly
@@ -805,19 +889,18 @@ async function handleChatbotResponse(sock, chatId, message, userMessage, senderI
     directlyAddressed = botMentioned || replyToBot || bodyHasBotNum;
   }
 
-  // ── Anti-spam cooldown ─────────────────────────────────────────────────────
+  // ── Anti-spam cooldown ───────────────────────────────────────────────────────────────────────────────────
   // Directly-addressed or owner → bypass user cooldown
   // Plain group messages → 15 s per-user cooldown
   const now = Date.now();
-  if (!isOwner && !directlyAddressed) {
-    const cdMs  = USER_CD_MS;
+  if (!isOwner) {
     const lastTs = userCooldown.get(require('../../utils/botScope').key(senderId)) || 0;
-    if (now - lastTs < cdMs) return;
+    if (now - lastTs < FLOOD_CD_MS) return;      // 3 s per user — stops spam, normal back-and-forth is unaffected
   }
   // Always update cooldown after passing the gate
   if (!isOwner) userCooldown.set(require('../../utils/botScope').key(senderId), now);
 
-  // ── Concurrent call limiter ────────────────────────────────────────────────
+  // ── Concurrent call limiter ──────────────────────────────────────────────────────────────────────────────────
   // Prevents API rate-limit when 5+ users chat simultaneously
   if (_activeChatbotCalls >= MAX_CHATBOT_CONCURRENT) {
     console.log(`[Chatbot] ⏸ Busy (${_activeChatbotCalls} active) — skipping ${senderId.split('@')[0]}`);
@@ -826,30 +909,37 @@ async function handleChatbotResponse(sock, chatId, message, userMessage, senderI
   _activeChatbotCalls++;
 
   try {
-    // ── Detect intent for personality tuning ────────────────────────────────
+    // ── Detect intent for personality tuning ──────────────────────────────────────────────────────────────────────
     const intentResult = detectIntent(userMessage);
     const intent       = intentResult?.intent || null;
 
-    // ── Get mood setting ─────────────────────────────────────────────────────
+    // ── Get mood setting ───────────────────────────────────────────────────────────────────────────────
     const moodKey = getMoodSettingKey(chatId);
     const _mdb3 = getDb();
-    const moodSetting = _mdb3 ? _mdb3.getBotSetting(botId, moodKey, 'simple') : 'simple';
+    const moodSetting = _mdb3 ? _mdb3.getBotSetting(botId, moodKey, 'roast') : 'roast';   // default = masti mode
     const isRoastMode = moodSetting === 'roast';
 
-    // ── Detect if user is being rude ─────────────────────────────────────────
+    // ── Detect if user is being rude ────────────────────────────────────────────────────────────────────
     const userIsBadtameezi = isBadtameezi(userMessage);
 
-    // ── Get conversation history ─────────────────────────────────────────────
+    // ── Get conversation history ──────────────────────────────────────────────────────────────────────────────
     const history    = getHistory(senderId);
     const senderName = message.pushName || '';
 
-    // ── Build personality prompt ─────────────────────────────────────────────
-    const systemPrompt = buildSystemPrompt(intent, senderName, isOwner, isRoastMode, userIsBadtameezi);
+    // ── Build personality prompt ──────────────────────────────────────────────────────────────────────────
+    const _skey   = require('../../utils/botScope').key(senderId);
+    if (claimsMinor(userMessage)) _minors.add(_skey);
+    const persona = {
+      gender : genderHint(_skey, senderName, userMessage),
+      minor  : _minors.has(_skey),
+      distress: DISTRESS.test(userMessage),
+    };
+    const systemPrompt = buildSystemPrompt(intent, senderName, isOwner, isRoastMode, userIsBadtameezi, persona);
 
-    // ── Show typing indicator ────────────────────────────────────────────────
+    // ── Show typing indicator ───────────────────────────────────────────────────────────────────────────
     await showTyping(sock, chatId);
 
-    // ── Call AI engine — pass senderId for per-user queue ────────────────────
+    // ── Call AI engine — pass senderId for per-user queue ───────────────────────────────────────────────────────────
     const result = await getAIResponse(systemPrompt, userMessage, history, senderId);
 
     let finalText;
@@ -861,19 +951,19 @@ async function handleChatbotResponse(sock, chatId, message, userMessage, senderI
       const fallbacks = [
         `Aray yaar, abhi mera dimagh thoda slow chal raha hai — thodi der baad dobara poochna! 😅`,
         `Bhai maafi chahta hoon, abhi server busy hai. Ek minute baad try karo! 🙏`,
-        `Abhi AI engine nahi uthaa — kuch second rukna please, phir reply karunga! ⏳`,
+        `Abhi AI engine nahi uthaā — kuch second rukna please, phir reply karunga! ⏳`,
         `Oops! Abhi meri processing slow hai. Dobara poochho thodi der baad! 😅`,
       ];
       finalText = fallbacks[Math.floor(Math.random() * fallbacks.length)];
     }
 
-    // ── Update conversation memory ───────────────────────────────────────────
+    // ── Update conversation memory ────────────────────────────────────────────────────────────────────────
     addToHistory(senderId, userMessage, finalText);
 
-    // ── Small human-like delay before sending ───────────────────────────────
+    // ── Small human-like delay before sending ──────────────────────────────────────────────────────────────────
     await new Promise(r => setTimeout(r, 150 + Math.random() * 300));
 
-    // ── Send response ────────────────────────────────────────────────────────
+    // ── Send response ────────────────────────────────────────────────────────────────────────────────
     try {
       await sock.sendMessage(chatId, { text: finalText }, { quoted: message });
       console.log(`[Chatbot] 💬 ${senderId.split('@')[0]} → ${chatId.split('@')[0].slice(-8)} via ${result?.api || 'fallback'} [${directlyAddressed ? 'direct' : 'open'} | ${isOwner ? 'owner' : 'user'}]`);
