@@ -66,6 +66,19 @@ module.exports = {
     try {
       const chatId = extra.from;
       
+      // `.newsletter debug <link>` → shows how WhatsApp's raw reply was decoded (send a screenshot of it if a channel is still not read)
+      if (String(args[0] || '').toLowerCase() === 'debug') {
+        const dbg = {};
+        try {
+          const code = getChannelInviteCode(args.slice(1).join(' ') || '');
+          if (!code) return extra.reply('Use: .newsletter debug <channel link>');
+          const m = await require('../../utils/newsletterMeta').fetchChannelMeta(sock, code, { forceRaw: true, debug: dbg });
+          return extra.reply(`🔎 *Debug*\n\n*Decoded:* ${m.name || '(no name)'} | ${m.id} | subs=${m.subscribers ?? '?'}\n\n*Raw reply:*\n${require('../../utils/newsletterMeta').describeRaw(dbg.raw)}`);
+        } catch (e) {
+          return extra.reply(`🔎 *Debug*\n\nError: ${e.message}\n\n*Raw reply:*\n${require('../../utils/newsletterMeta').describeRaw(dbg.raw)}`);
+        }
+      }
+
       // Get link from args or message text
       const text = msg.message?.conversation || 
                    msg.message?.extendedTextMessage?.text ||
