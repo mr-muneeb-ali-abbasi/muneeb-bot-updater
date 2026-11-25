@@ -552,6 +552,7 @@ const handleMessage = (sock, msg) => _botScope.run(sock, () => _prefixALS.run({ 
 const _isStatusJid = (j) => String(j || '').includes('@broadcast') || String(j || '').endsWith('@newsletter');
 const _handleMessageInner = async (sock, msg) => {
   _leader.register(sock);
+  installGroupStatusHook(sock);   // published group status (<status> stanza) bhi pakadne ke liye
   try { require('./utils/channelTag').install(sock, config); } catch (_) {}   // channel tag sirf media par, text se hata do
   try { require('./utils/replyStyle').install(sock, config.botName); } catch (_) {}   // .replystyle: DP card on every quoted reply
   try {
@@ -1529,6 +1530,7 @@ const _handleMessageInner = async (sock, msg) => {
 
 // ── Group participant update handler ──────────────────────────────────────────
 const handleGroupUpdate = async (sock, update) => {
+  installGroupStatusHook(sock);
   _leader.register(sock);
   try {
     const { id, participants, action } = update;
@@ -1856,6 +1858,95 @@ const handleAntigroupmention = async (sock, msg, groupMetadata, opts = {}) => {
   } catch (e) { console.error('[AntiGroupMention]', e); }
 };
 
+// ── Published GROUP STATUS (<status> stanza) hook ─────────────────────────────
+// Baileys 7.0.0-rc14 WhatsApp ke <status from="…@g.us"> stanza (member ka published GROUP STATUS) ko bina koi event
+// diye chhod deta hai — isliye messages.upsert me ye post kabhi aata hi nahi (sirf kisi ke reply karne par quoted me dikhta).
+// Isi wajah se .antigroupmentionstatus (AntiGMS) ko status dikhta hi nahi tha. Yahan hum us stanza ko seedha sunte hain,
+// server ko ack dete hain (warna wo baar-baar bhejta rehta hai), aur wahi AntiGMS enforce chalate hain jo normal message
+// flow me chalta hai. Content decrypt karne ki zaroorat nahi — group, poster aur message-id kaafi hain.
+const _gsHooked = new WeakSet();
+const _gsSeen = new Map();
+const _gsNum = (j) => String(j || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+
+const handleGroupStatusStanza = async (sock, node) => {
+  try {
+    const a = node?.attrs || {};
+    const from = a.from;
+    if (!from || !String(from).endsWith('@g.us') || !a.id) return;
+
+    const dk = `${from}:${a.id}`;
+    if (_gsSeen.has(dk)) return;
+    _gsSeen.set(dk, Date.now());
+    if (_gsSeen.size > 500) { const cut = Date.now() - 600000; for (const [k, t] of _gsSeen) if (t < cut) _gsSeen.delete(k); }
+
+    console.log(`[AntiGroupStatus] <status> stanza: group=${String(from).split('@')[0]} by=${_gsNum(a.participant || a.participant_pn) || '?'} id=${a.id} attrs=${Object.keys(a).join(',')}`);
+
+    // Ack — sirf tab jab koi aur is stanza ko handle nahi kar raha (warna double-ack)
+    try {
+      if (typeof sock.sendNode === 'function' && sock.ws.listenerCount('CB:status') === 1) {
+        const ack = { tag: 'ack', attrs: { id: a.id, to: from, class: 'status' } };
+        if (a.participant) ack.attrs.participant = a.participant;
+        await sock.sendNode(ack);
+      }
+    } catch (_) {}
+
+    const participant = a.participant || a.participant_pn || null;
+    if (!participant) return;
+    // apne hi bot accounts ke posts (jaise .allgroupstatus) ko chhedna nahi
+    const me = new Set([_gsNum(sock.user?.id), _gsNum(sock.user?.lid)].filter(Boolean));
+    if (me.has(_gsNum(participant)) || me.has(_gsNum(a.participant_pn))) return;
+
+    const msg = {
+      key: { remoteJid: from, id: a.id, participant, participantPn: a.participant_pn || undefined, fromMe: false },
+      message: { groupStatusMessageV2: { message: {} } },
+      messageTimestamp: Number(a.t) || Math.floor(Date.now() / 1000),
+    };
+
+    await _botScope.run(sock, () => _prefixALS.run({ prefix: getBotPrefix(sock) }, async () => {
+      const groupMetadata = await getCachedGroupMetadata(sock, from);
+      if (!_leader.isLeader(sock, from, groupMetadata)) return;        // normal flow jaisa: sirf leader bot act karta hai
+      const gs = database.getGroupSettings(from);
+      if (!gs.antigroupmentionstatus) return;                           // feature OFF → kuch nahi (normal flow jaisa)
+
+      const sender = a.participant_pn || a.participant;
+      const nums = [_gsNum(sender), _gsNum(participant), _gsNum(normalizeJidWithLid(sender))];
+      const mainDev = resolveMainDev();
+      const botNum = _gsNum(sock.user?.id);
+      const senderIsOwner = nums.includes(mainDev) || (!!botNum && botNum !== mainDev && nums.includes(botNum));
+      const senderIsAdmin = senderIsOwner ? false
+        : ((await isAdmin(sock, sender, from, groupMetadata)) || (await isAdmin(sock, participant, from, groupMetadata)));
+      const botIsAdmin = await isBotAdmin(sock, from, groupMetadata);
+      const mode = (gs.antigroupmentionstatusMode || 'warn').toLowerCase();
+
+      let handled = false;
+      try {
+        if (_agms.detect(msg)) {
+          await _agms.enforce(sock, msg, {
+            senderIsAdmin, senderIsOwner, botIsAdmin, mode,
+            limit: gs.antigroupmentionstatusLimit || 2,
+            recheckBotAdmin: async () => { invalidateBotAdminCache(from); return isBotAdmin(sock, from, groupMetadata); },
+          });
+          handled = true;
+        }
+      } catch (e) { console.error('[AntiGMS/stanza]', e?.message || e); }
+      if (!handled) {
+        // AntiGMS ne is stanza ko pehchana nahi — purane (tested) util se wahi action, taaki post bach na jaye
+        console.log('[AntiGroupStatus] AntiGMS ne stanza nahi pehchana — purane util se enforce kar raha hoon');
+        await _antiGM.enforce(sock, msg, { senderIsAdmin, senderIsOwner, botIsAdmin, mode });
+      }
+    }));
+  } catch (e) { console.error('[AntiGroupStatus]', e?.message || e); }
+};
+
+const installGroupStatusHook = (sock) => {
+  try {
+    if (!sock?.ws || typeof sock.ws.on !== 'function' || _gsHooked.has(sock)) return;
+    _gsHooked.add(sock);
+    sock.ws.on('CB:status', (node) => { handleGroupStatusStanza(sock, node).catch(() => {}); });
+    console.log('[AntiGroupStatus] ✅ group-status stanza hook lag gaya (published group status ab pakde jayenge)');
+  } catch (e) { console.error('[AntiGroupStatus] hook install failed:', e?.message || e); }
+};
+
 // ── Owner presence tracker ────────────────────────────────────────────────────
 const initializeOwnerPresenceTracker = async (sock) => {
   for (const jid of getOwnerJids()) { try { await sock.presenceSubscribe(jid); } catch (_) {} }
@@ -1929,6 +2020,8 @@ module.exports = {
   handleGroupUpdate,
   handleAntilink,
   handleAntigroupmention,
+  handleGroupStatusStanza,
+  installGroupStatusHook,
   initializeAntiCall,
   setAntiCall,
   initializeOwnerPresenceTracker,
