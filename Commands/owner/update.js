@@ -2,7 +2,7 @@
 
 /**
  * Update Command — GitHub-based auto-updater (v2: version-check + automatic restart)
- * ─────────────────────────────────────────────────────────────────────────
+ * ───────────────────────────────────────────────────────────────────────
  * Source  : utils/updateSource.js (zip of the update repo + version.json of the SAME repo)
  *
  * .update          → version check → NAYA version ho to: download → files copy → khud RESTART (exit 42, watchdog turant relaunch).
@@ -27,9 +27,8 @@ const http      = require('http');
 const config    = require('../../config');
 
 const _src = require('../../utils/updateSource');
-const GITHUB_ZIP_URL = _src.zipUrl();
-const VERSION_URL = _src.versionUrl() || config.updateVersionUrl ||
-  'https://raw.githubusercontent.com/mr-muneeb-ali-abbasi/muneeb-bot-updater/main/version.json';
+// URLs are computed at call time (not at load) so a token added with .updatetoken works without a restart
+const versionUrlNow = () => _src.versionUrl() || config.updateVersionUrl;
 
 // Folders / files that MUST NOT be overwritten by an update
 const PRESERVE = new Set([
@@ -74,10 +73,10 @@ function downloadFile(url, dest, visited = new Set()) {
 
     const client = url.startsWith('https://') ? https : http;
     const req = client.get(url, {
-      headers: {
+      headers: _src.headersFor(url, {
         'User-Agent': 'MuneebAliBot-Updater/2.0',
         'Accept'    : 'application/octet-stream, */*',
-      },
+      }),
       timeout: 60_000,
     }, res => {
       if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
@@ -104,7 +103,7 @@ function fetchJson(url) {
     // ?t= : GitHub raw ka cache todne ke liye (purana version.json na mile)
     const u = url + (url.includes('?') ? '&' : '?') + 't=' + Date.now();
     const req = https.get(u, {
-      headers: { 'User-Agent': 'MuneebAliBot-Updater/2.0', 'Accept': 'application/json', 'Cache-Control': 'no-cache' },
+      headers: _src.headersFor(u, { 'User-Agent': 'MuneebAliBot-Updater/2.0', 'Accept': 'application/json', 'Cache-Control': 'no-cache' }),
       timeout: 10_000,
     }, res => {
       if (res.statusCode !== 200) { res.resume(); return reject(new Error(`HTTP ${res.statusCode} (version.json nahi mila)`)); }
@@ -138,7 +137,7 @@ function copyRecursive(src, dest, preserve, relPath = '', copied = []) {
   return copied;
 }
 
-// ── helpers for the version check / dependency check ────────────────────────────
+// ── helpers for the version check / dependency check ─────────────────────────────────────────────────────────
 function semverGt(a, b) {
   const p = v => String(v || '0').replace(/[^0-9.]/g, '').split('.').map(n => parseInt(n, 10) || 0);
   const x = p(a), y = p(b);
@@ -178,7 +177,16 @@ async function updateViaZip(zipUrl, statusFn, { localVer, force }) {
 
   try {
     await statusFn('⬇️ Naya code download ho raha hai…');
-    await D.downloadFile(zipUrl, zipPath);
+    try {
+      await D.downloadFile(zipUrl, zipPath);
+    } catch (e) {
+      // token set but dead (expired/revoked) while the repo is still public → try the public URL once
+      if (_src.isAuthUrl(zipUrl) && zipUrl === _src.zipUrl()) {
+        console.warn('[Update] token download failed (' + e.message + ') — trying the public URL');
+        try { await D.downloadFile(_src.publicZipUrl(), zipPath); }
+        catch (e2) { e2.message = e.message; throw e; }
+      } else throw e;
+    }
 
     await statusFn('📦 Extract ho raha hai…');
     if (fs.existsSync(extractTo)) fs.rmSync(extractTo, { recursive: true, force: true });
@@ -233,7 +241,7 @@ module.exports = {
     const arg0   = String((args && args[0]) || '').trim();
     const customZip = /^https?:\/\//i.test(arg0) ? arg0 : null;
     const force  = customZip !== null || /^(force|-f|--force)$/i.test(arg0);
-    const zipUrl = customZip || GITHUB_ZIP_URL;
+    const zipUrl = customZip || _src.zipUrl();
 
     if (_updating) return extra.reply('⏳ Update pehle se chal raha hai — thodi der ruko.');
     _updating = true;
@@ -256,11 +264,16 @@ module.exports = {
       let remoteVer = null;
       if (!customZip) {
         try {
-          const remote = await D.fetchJson(VERSION_URL);
+          let remote;
+          try { remote = await D.fetchJson(versionUrlNow()); }
+          catch (e1) {
+            if (_src.token()) { try { remote = await D.fetchJson(_src.publicVersionUrl()); } catch (_) { throw e1; } }
+            else throw e1;
+          }
           remoteVer = remote && remote.version ? String(remote.version) : null;
         } catch (e) {
           if (!force) {
-            return await statusFn(`❌ *Version check fail hua:* ${e.message}\n\nThodi der baad dobara try karo, ya zabardasti update ke liye *.update force* likho.`);
+            return await statusFn(`❌ *Version check fail hua:* ${_src.scrub(e.message)}${_src.explain(e)}\n\nThodi der baad dobara try karo, ya zabardasti update ke liye *.update force* likho.`);
           }
         }
         if (!remoteVer && !force) {
@@ -330,7 +343,7 @@ module.exports = {
       D.exit(42);
     } catch (error) {
       console.error('[Update] Failed:', error);
-      await statusFn(`❌ *Update fail hua:*\n${error.message}\n\nBot restart nahi hua, purana code chal raha hai.`);
+      await statusFn(`❌ *Update fail hua:*\n${_src.scrub(error.message)}${_src.explain(error)}\n\nBot restart nahi hua, purana code chal raha hai.`);
     } finally {
       if (!restarting) _updating = false;
     }
