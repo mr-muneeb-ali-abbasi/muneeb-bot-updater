@@ -2,12 +2,12 @@
 
 /**
  * utils/caseFix.js — galat-case folders ko sahi naam par laata hai
- * ─────────────────────────────────────────────────────────────────────────
+ * ───────────────────────────────────────────────────────────────────────────────
  * Linux par `Commands/` aur `commands/` alag folders hain. Bot ka code `./commands/...` aur `./Panel/...`
  * maangta hai. Agar kisi server par purane zip/backup se `Commands/` ya `panel/` ban gaya ho to:
  *   • sirf wahi folder (galat case) hoga  → us ka naam sahi kar deta hai
  *   • dono maujood honge                  → galat-case wale ki bachi hui files sahi folder mein merge karta hai
- *                                           (sahi folder ki files hamesha jeetti hain), phir galat folder hata deta hai
+ *                                           (jo file nayi ho wahi jeetti hai — modified-time se), phir galat folder hata deta hai
  *
  * Panel/Public/panel.html (admin panel /manage) bhi sahi jagah par laata hai: agar `Panel/public` (chhota p) aur
  * `Panel/Public` dono ho gaye hon (server.js `Public` ko pehle dekhta hai) to unhe merge karta hai, aur panel.html kisi
@@ -30,7 +30,16 @@ function moveFile(src, dest) {
   catch (_) { fs.copyFileSync(src, dest); fs.unlinkSync(src); }       // alag disk (EXDEV) par rename nahi chalta
 }
 
-// src ki files dest mein daalo — jo dest mein pehle se hai use mat chhuo
+// src ki files dest mein daalo.
+//   • dest mein file nahi hai          → src ki file aa jati hai
+//   • dono mein hai, src ki file NAYI  → src jeetti hai  (taaza .update ki files; pehle ye files chup-chaap phek di jati thi
+//                                         aur update ke baad bhi purana code chalta rehta tha — "Commands/" vs "commands/" bug)
+//   • dono mein hai, dest ki file nayi / barabar → dest jeetti hai (purane zip/backup se bana galat-case folder naye ko kharab na kare)
+// "Nayi" = modified-time (copyFileSync / upload se aayi file ka waqt abhi ka hota hai; purane zip wali file ka purana).
+const NEWER_BY_MS = 1000;
+function isNewer(srcFile, destFile) {
+  try { return fs.statSync(srcFile).mtimeMs > fs.statSync(destFile).mtimeMs + NEWER_BY_MS; } catch (_) { return false; }
+}
 function mergeDir(src, dest) {
   fs.mkdirSync(dest, { recursive: true });
   for (const name of fs.readdirSync(src)) {
@@ -39,14 +48,14 @@ function mergeDir(src, dest) {
     if (lst.isDirectory()) {
       if (fs.existsSync(d) && isDir(d)) mergeDir(s, d);
       else if (!fs.existsSync(d)) { try { fs.renameSync(s, d); } catch (_) { mergeDir(s, d); } }
-    } else if (!fs.existsSync(d)) {
+    } else if (!fs.existsSync(d) || isNewer(s, d)) {
       moveFile(s, d);
     }
   }
   fs.rmSync(src, { recursive: true, force: true });
 }
 
-// ── Admin panel: Panel/Public/panel.html ("panel.html not found" ka ilaaj) ─────────────────────────────────────
+// ── Admin panel: Panel/Public/panel.html ("panel.html not found" ka ilaaj) ─────────────────────────────────────────────────────────────
 // panel/server.js pehle `Public` dekhta hai, na ho tabhi `public`. Update ke baad agar `Public` ban gaya (zip se)
 // par panel.html purane `public` mein reh gaya, to /manage "panel.html not found" deta hai.
 function healPanelHtml(root, done) {

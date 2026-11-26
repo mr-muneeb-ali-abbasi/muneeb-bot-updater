@@ -1,5 +1,5 @@
 {
-  "version": "1.6.5",
-  "releaseDate": "2026-11-24",
-  "changelog": "Chatbot: ab sirf bot ke message ko reply karne par jawab deta hai (ladkon ko roast, ladkiyon se halka flirt)\nAI engine naya: free providers + models khud live list se chunta hai (.aikey providers)\nGroup status/link: ab post delete bhi hota hai, sirf kick nahi\n.newsletter aur channel react Baileys rc14 ke liye theek kiye\nPrivate update repo support: .updatetoken (read-only GitHub token)"
+  "version": "1.6.6",
+  "releaseDate": "2026-11-26",
+  "changelog": "FIX: update ke baad Commands ki nayi files ab sahi load hoti hain (chatbot roast, newsletter, .checkupdate pehle purane reh jate the)\nChatbot: sirf bot ke message ko reply karne par jawab (ladkon ko roast, ladkiyon se halka flirt)\nAI engine naya: free providers + models khud live list se chunta hai (.aikey providers)\nGroup status/link: post ab delete bhi hota hai, sirf kick nahi\nPrivate update repo support: .updatetoken (read-only GitHub token)"
 }
